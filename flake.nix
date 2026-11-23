@@ -255,7 +255,7 @@
               };
               systemd.timers.fleet-agent.timerConfig.OnUnitActiveSec = lib.mkForce "2min";
               # Bump this to make a new version to roll out (README: "See an update roll out").
-              environment.etc."fleet-release".text = "demo-lab 2\n";
+              environment.etc."fleet-release".text = "demo-lab 3\n";
               # Sparse; room for the next generation's store paths.
               disko.devices.disk.main.imageSize = "24G";
             }
