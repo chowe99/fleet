@@ -8,7 +8,7 @@ from one flake.
 
 | Path | What |
 |------|------|
-| `flake.nix` | `lib.mkUsers`, `lib.mkFleet`, modules, template, `school-vm`, checks |
+| `flake.nix` | `lib.mkUsers`, `lib.mkFleet`, modules, template, `school-vm`, `demo-lab` + `demo-image`, checks |
 | `modules/base.nix` | installable image: UEFI systemd-boot, disko layout, generic hardware |
 | `modules/desktop.nix` | `nixosModules.desktop`: Plasma 6 with a bottom taskbar, start menu and pinned apps (`desktop-layout.js`), LibreOffice, en_AU |
 | `modules/school.nix` | `nixosModules.school`: desktop plus lockdown (no sudo/nix for non-admins, USB storage blocked, Firefox policies, KDE Kiosk, screen lock, no app store) |
@@ -30,7 +30,46 @@ nix run .#school-vm
 ```
 
 Log in as `student1`, `teacher1` or `itadmin` (the only admin) with the demo
-password `demo`. That password exists only in this VM's configuration.
+password `demo`. That password exists only in the demo configurations
+(`school-vm`, `demo-lab`).
+
+## See an update roll out
+
+`.#demo-image` is the school image installed on a disk (group `demo-lab`, PC
+`demo-lab-01`): UEFI, systemd-boot and its own `/nix/store`, so it can stage a
+new version and boot into it. It reports to https://fleet.codered.lol
+(organisation "Demo School") every 2 minutes.
+
+1. Build the image and boot it. The enrol token (panel > Settings) goes in over
+   QEMU fw_cfg, so it is never in the image or the store:
+
+   ```sh
+   D=$(mktemp -d)
+   nix build .#demo-image -o $D/image
+   cp --sparse=always $D/image/main.raw $D/disk.raw && chmod u+w $D/disk.raw   # 24G, sparse
+   OVMF=$(nix build --no-link --print-out-paths nixpkgs#OVMF.fd)
+   install -m600 $OVMF/FV/OVMF_VARS.fd $D/vars.fd
+   printf %s '<enrol token>' > $D/token
+   env -u LD_LIBRARY_PATH $(nix build --no-link --print-out-paths nixpkgs#qemu_kvm)/bin/qemu-system-x86_64 \
+     -enable-kvm -m 6144 -smp 4 \
+     -drive if=pflash,format=raw,readonly=on,file=$OVMF/FV/OVMF_CODE.fd \
+     -drive if=pflash,format=raw,file=$D/vars.fd \
+     -drive file=$D/disk.raw,format=raw,if=virtio \
+     -fw_cfg name=opt/codered/enroll-token,file=$D/token \
+     -nic user,model=virtio-net-pci
+   ```
+
+2. **Devices:** `demo-lab-01` appears in the `everyone` ring, running the commit
+   the image was built from. Open it and move it to `pilot`.
+3. **Rings:** set `pilot`'s target to a newer commit of `github:chowe99/fleet`
+   (one that bumps `/etc/fleet-release`). The PC builds that commit and stages
+   it: its last update shows the commit as ok, but it keeps running the old one,
+   so nothing changes mid-lesson.
+4. Restart the PC (start menu or login screen). It comes back on the new commit,
+   and `cat /etc/fleet-release` shows the bump.
+5. **Rings:** promote `pilot` to send the same version to `everyone`.
+
+`tests/e2e-update.sh <commit>` runs steps 1 to 4 headless against the panel.
 
 ## Design
 
