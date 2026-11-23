@@ -71,6 +71,39 @@ new version and boot into it. It reports to https://fleet.codered.lol
 
 `tests/e2e-update.sh <commit>` runs steps 1 to 4 headless against the panel.
 
+## Settings (fleet-settings.json)
+
+Per-customer settings are plain data, so the panel can edit them without touching
+Nix. A customer's config repo carries `fleet-settings.json`, and the template's
+`flake.nix` passes it to `mkFleet { settings = ...; }`. Every key is optional:
+
+```json
+{ "homepage": "https://...",
+  "usbStorage": true,
+  "timezone": "Australia/Sydney",
+  "wifi": [{ "ssid": "SchoolNet", "psk": "..." }],
+  "printers": [{ "name": "Library", "uri": "ipp://10.0.0.5/ipp/print" }],
+  "generate": { "student": 30 } }
+```
+
+| Key | Becomes |
+|-----|---------|
+| `homepage` | Firefox homepage for every group (`programs.firefox.policies.Homepage.URL`) |
+| `usbStorage` | `codered.fleet.school.allowUsbStorage` |
+| `timezone` | `time.timeZone` (default `Australia/Perth`) |
+| `wifi` | NetworkManager `ensureProfiles`: WPA-PSK, autoconnect |
+| `printers` | `hardware.printers.ensurePrinters` (driverless, model `everywhere`), CUPS on |
+| `generate` | merged into `mkUsers`' `generate` (wins over the `users.generate` argument) |
+
+Settings apply to every group at normal priority, so a group's own `modules` can
+override them with `lib.mkForce`. An unknown key, a wrong type, or a printer name
+that is not CUPS-safe (letters, digits, `_`, `-`) fails evaluation with a clear message.
+
+**Security: Wi-Fi passwords are not secret.** A `psk` is written into the NixOS
+configuration, so it lands in the world-readable Nix store (and the repo) on every
+PC. Treat it as visible to any local user. Moving PSKs to a runtime-read secret file
+is future work.
+
 ## Design
 
 - **One image per group, not per PC.** `mkFleet { groups = { lab = { profile = "school"; }; }; ... }`
