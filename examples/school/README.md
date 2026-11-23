@@ -1,5 +1,13 @@
 # Our school's PCs
 
+## Settings: use the Fleet panel
+
+Edit settings (homepage, Wi-Fi, printers, timezone, USB storage, number of
+students) in the CodeRed Fleet panel at https://fleet.codered.lol. It commits
+your changes to `fleet-settings.json` in this repository, so you don't edit that
+file by hand. Wi-Fi passwords there are stored in plain text in this repository
+and on every PC, so use a network password you can rotate.
+
 ## Add a person: add a folder
 
 Every person who isn't a generated student has a folder in `users/`:
@@ -24,7 +32,8 @@ first logs in, so a large number costs nothing on PCs nobody uses.
 
 Each entry in `groups` (here `lab` and `library`) is one system image, shared by
 every PC in that group. Put settings for one group in its `modules`, and
-settings for every PC in `common`.
+settings for every PC in `common`. Panel settings in `fleet-settings.json` apply
+to every group; a group's `modules` can override them with `lib.mkForce`.
 
 ## Rolling out a change
 
