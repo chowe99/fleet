@@ -194,6 +194,7 @@
       fleet = import ./tests/fleet.nix {inherit self pkgs;};
       school = import ./tests/school.nix {inherit self pkgs;};
       agent-hardware = import ./tests/agent-hardware.nix {inherit self pkgs;};
+      settings = import ./tests/settings.nix {inherit self pkgs;};
     };
   };
 }
