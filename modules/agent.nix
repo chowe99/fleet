@@ -18,6 +18,7 @@
       pkgs.coreutils
       pkgs.curl
       pkgs.jq
+      pkgs.util-linux # lscpu, the CPU-name fallback
       pkgs.gitMinimal
       config.nix.package
       config.programs.ssh.package
@@ -59,15 +60,69 @@
       }
       current_rev() { rev_of /run/current-system; } # changes after a switch or reboot
 
+      num() { [[ ''${1:-} =~ ^[0-9]+$ ]] && echo "$1" || echo 0; }
+
+      # The PC's hardware as JSON. Never fails: anything unreadable becomes "", 0 or null.
+      hardware() {
+        local vendor model ver cpu k v out ram=0 size avail total=0 free=0 bat full design cycles health
+        vendor=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true)
+        model=$(cat /sys/class/dmi/id/product_name 2>/dev/null || true)
+        if [[ $vendor == LENOVO* ]]; then # product_name is a part number; product_version is "ThinkPad T480"
+          ver=$(cat /sys/class/dmi/id/product_version 2>/dev/null || true)
+          model=''${ver:-$model}
+        fi
+        cpu=
+        while IFS=: read -r k v; do
+          if [[ $k == "model name"* ]]; then cpu=$v; break; fi
+        done < /proc/cpuinfo 2>/dev/null || true
+        if [[ -z $cpu ]]; then
+          out=$(lscpu 2>/dev/null || true)
+          while IFS=: read -r k v; do
+            if [[ $k == "Model name"* ]]; then cpu=$v; break; fi
+          done <<< "$out"
+        fi
+        while read -r k v _; do
+          if [[ $k == MemTotal: ]]; then ram=$(($(num "$v") / 1024)); break; fi
+        done < /proc/meminfo 2>/dev/null || true
+        read -r size avail < <(df -B1 --output=size,avail / 2>/dev/null | tail -n1) || true
+        total=$(($(num "''${size:-}") / 1073741824))
+        free=$(($(num "''${avail:-}") / 1073741824))
+
+        bat=null
+        for b in /sys/class/power_supply/BAT*; do
+          [[ -d $b ]] || continue
+          full=$(cat "$b/energy_full" 2>/dev/null || cat "$b/charge_full" 2>/dev/null || true)
+          design=$(cat "$b/energy_full_design" 2>/dev/null || cat "$b/charge_full_design" 2>/dev/null || true)
+          cycles=$(cat "$b/cycle_count" 2>/dev/null || true)
+          full=$(num "$full")
+          design=$(num "$design")
+          health=0
+          if ((design > 0)); then health=$((full * 100 / design)); fi
+          if ((health > 100)); then health=100; fi
+          bat=$(jq -n --argjson h "$health" --argjson c "$(num "$cycles")" '{health_pct: $h, cycle_count: $c}')
+          break
+        done
+
+        jq -n --arg vendor "$vendor" --arg model "$model" --arg cpu "$cpu" \
+          --argjson ram_mb "$ram" --argjson disk_total_gb "$total" --argjson disk_free_gb "$free" \
+          --argjson battery "$bat" \
+          'def clean: gsub("^\\s+|\\s+$"; "") | .[0:255];
+           {vendor: ($vendor | clean), model: ($model | clean), cpu: ($cpu | clean),
+            $ram_mb, $disk_total_gb, $disk_free_gb, $battery}'
+      }
+
       report() {
+        local hw
+        hw=$(hardware 2>/dev/null) || hw=null
         local last_update=null
         if [[ -s ${state}/last-update.json ]]; then last_update=$(< ${state}/last-update.json); fi
         jq -n --arg hostname "$hostname" --arg serial "$serial" --arg profile "$profile" \
           --arg current_rev "$(current_rev)" \
           --arg nixos_version "$(/run/current-system/sw/bin/nixos-version)" \
           --argjson uptime_s "$(cut -d. -f1 /proc/uptime)" \
-          --argjson last_update "$last_update" \
-          '{$hostname, $serial, $profile, $current_rev, $nixos_version, $uptime_s, $last_update}' |
+          --argjson last_update "$last_update" --argjson hardware "$hw" \
+          '{$hostname, $serial, $profile, $current_rev, $nixos_version, $uptime_s, $last_update}
+           + (if $hardware == null then {} else {$hardware} end)' |
           post /api/v1/report -H @<(printf 'Authorization: Bearer %s\n' "$(< ${state}/device-token)")
       }
 
