@@ -30,10 +30,9 @@
         enable = true;
         url = "https://fleet.codered.lol"; # the CodeRed panel
         enrollTokenFile = "/var/lib/fleet-agent/enroll-token"; # written at install
-        # TODO: once the agent has a `flakeUrlTemplate` option, set it to
-        # "https://fleet.codered.lol/api/v1/config/{rev}.tar.gz" so PCs fetch this config from
-        # the panel. Until then `flake` is the fallback.
-        flake = "git+https://git.school.example/it/fleet"; # this repository
+        # PCs fetch this config from the panel, authenticating with their device token.
+        flakeUrlTemplate = "https://fleet.codered.lol/api/v1/config/{rev}.tar.gz";
+        # flake = "git+https://git.school.example/it/fleet"; # optional fallback if the template is unset
       };
     };
     # mkForce: a group's own homepage beats the panel-wide one in fleet-settings.json.

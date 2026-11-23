@@ -31,6 +31,7 @@
       url=${quote cfg.url}
       profile=${quote cfg.profile}
       flake=${quote cfg.flake}
+      flake_template=${quote cfg.flakeUrlTemplate}
       group=${quote cfg.group}
       umask 077
 
@@ -53,6 +54,15 @@
         mv ${state}/device-token.new ${state}/device-token
         echo "enrolled with $url"
       fi
+
+      # nix authenticates to the panel (config tarballs) with the device token via a private netrc.
+      # Rewritten every run so it follows token changes; the token is never printed.
+      host=''${url#*://}
+      host=''${host%%/*}
+      host=''${host##*@}
+      if [[ $host == \[* ]]; then host=''${host%%]*}; host=''${host#[}; else host=''${host%%:*}; fi
+      printf 'machine %s login device password %s\n' "$host" "$(< ${state}/device-token)" > ${state}/netrc.new
+      mv ${state}/netrc.new ${state}/netrc
 
       rev_of() { # rev_of <system>: the revision it was built from
         local rev
@@ -164,13 +174,19 @@
           if [[ -n $target && $target != "$(current_rev)" ]]; then echo "$target is staged; waiting for a reboot"; fi
           return 0
         fi
-        if [[ -z $flake || -z $group ]]; then
+        if [[ -z $group || ( -z $flake && -z $flake_template ) ]]; then
           echo "panel wants $target, but no flake/group is configured; not applying" >&2
           stage_status=noconfig
           return 0
         fi
-        local ok=false
-        if nixos-rebuild ${cfg.applyMode} --flake "$flake?rev=$target#$group"; then ok=true; stage_status=ok; else stage_status=failed; fi
+        local ok=false src
+        if [[ ! $target =~ ^[0-9a-f]{7,40}$ ]]; then
+          echo "panel sent an invalid target revision; not applying" >&2
+          stage_status=failed
+          return 0
+        fi
+        if [[ -n $flake_template ]]; then src=''${flake_template//'{rev}'/$target}; else src="$flake?rev=$target"; fi
+        if nixos-rebuild ${cfg.applyMode} --flake "$src#$group"; then ok=true; stage_status=ok; else stage_status=failed; fi
         jq -n --arg rev "$target" --argjson ok "$ok" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           '{$rev, $ok, $at}' > ${state}/last-update.json
         updated=true
@@ -245,6 +261,15 @@ in {
       example = "git+https://git.school.example/it/fleet";
       description = "The customer's fleet flake URL. Updates are not applied while this is null.";
     };
+    flakeUrlTemplate = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "https://fleet.codered.lol/api/v1/config/{rev}.tar.gz";
+      description = ''
+        Where to fetch the config for a target revision; `{rev}` is replaced by it. Takes precedence
+        over `flake`. For panel-hosted config nix authenticates with the device token via a netrc.
+      '';
+    };
     group = mkOption {
       type = types.nullOr types.str;
       default = null;
@@ -259,6 +284,7 @@ in {
 
   config = lib.mkIf cfg.enable {
     nix.settings.experimental-features = ["nix-command" "flakes"];
+    nix.settings.netrc-file = "${state}/netrc";
 
     systemd.services.fleet-agent = {
       description = "CodeRed Fleet agent";

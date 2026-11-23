@@ -82,6 +82,21 @@ new version and boot into it. It reports to https://fleet.codered.lol
 
 `tests/e2e-update.sh <commit>` runs steps 1 to 4 headless against the panel.
 
+## Config hosted by the panel
+
+The panel hosts each customer's config repo and serves any commit as a tarball at
+`https://<panel>/api/v1/config/<sha>.tar.gz`, behind HTTP basic auth (user `device`, password = the
+PC's device token). Set `codered.fleet.agent.flakeUrlTemplate = "https://<panel>/api/v1/config/{rev}.tar.gz"`
+and an update runs `nixos-rebuild <applyMode> --flake "<template with {rev} replaced>#<group>"`. The
+template takes precedence over `flake`; with it unset the old `<flake>?rev=<rev>#<group>` path is used.
+The agent rejects target revisions that are not 7-40 lowercase hex characters.
+
+After enrolment (and on every run, so token changes follow) the agent writes
+`/var/lib/fleet-agent/netrc` (`machine <panel host> login device password <token>`, root-only, mode
+0600) and the module sets `nix.settings.netrc-file` to it, so nix authenticates to the panel host only.
+The token is as protected as the device token already is: root-only on disk, never printed or put on
+a command line.
+
 ## Settings (fleet-settings.json)
 
 Per-customer settings are plain data, so the panel can edit them without touching
