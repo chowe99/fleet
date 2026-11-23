@@ -104,10 +104,37 @@
       '';
     };
 
+    # The school image as a QEMU VM. Demo password only here, never in lib.
+    nixosConfigurations.school-vm =
+      (self.lib.mkFleet {
+        rev = self.rev or self.dirtyRev or null;
+        groups.lab = {
+          profile = "school";
+          modules = [
+            {
+              networking.hostName = "school-vm";
+              users.users = lib.genAttrs ["student1" "teacher1" "itadmin"] (_: {initialPassword = "demo";});
+              virtualisation.vmVariant.virtualisation = {
+                memorySize = 4096;
+                cores = 2;
+              };
+            }
+          ];
+        };
+        users = {
+          generate.student = 30;
+          dir = ./examples/school/users;
+        };
+      }).lab;
+
     apps.${system} = {
       new-user = {
         type = "app";
         program = lib.getExe self.packages.${system}.new-user;
+      };
+      school-vm = {
+        type = "app";
+        program = lib.getExe self.nixosConfigurations.school-vm.config.system.build.vm;
       };
     };
 
