@@ -20,6 +20,7 @@
       pkgs.jq
       pkgs.util-linux # lscpu, the CPU-name fallback
       pkgs.gitMinimal
+      pkgs.systemd # loginctl, systemctl
       config.nix.package
       config.programs.ssh.package
       config.system.build.nixos-rebuild
@@ -111,6 +112,23 @@
             $ram_mb, $disk_total_gb, $disk_free_gb, $battery}'
       }
 
+      # Results of remote actions to send with the next report: a JSON array of {id, status, detail?}.
+      # Ones carried over a reboot are kept in pending-results.json until a report has delivered them.
+      results='[]'
+      carried=false
+      if [[ -s ${state}/pending-results.json ]]; then
+        if jq -ec 'if type == "array" then . else error("not an array") end' ${state}/pending-results.json > ${state}/pending-results.tmp 2>/dev/null; then
+          results=$(< ${state}/pending-results.tmp)
+          carried=true
+        fi
+        rm -f ${state}/pending-results.tmp
+      fi
+
+      add_result() { # add_result <id> <done|failed|deferred> [detail]
+        results=$(jq -c --arg id "$1" --arg status "$2" --arg detail "''${3:-}" \
+          '. + [{$id, $status} + (if $detail == "" then {} else {detail: $detail[0:255]} end)] | .[-20:]' <<< "$results")
+      }
+
       report() {
         local hw
         hw=$(hardware 2>/dev/null) || hw=null
@@ -120,31 +138,88 @@
           --arg current_rev "$(current_rev)" \
           --arg nixos_version "$(/run/current-system/sw/bin/nixos-version)" \
           --argjson uptime_s "$(cut -d. -f1 /proc/uptime)" \
-          --argjson last_update "$last_update" --argjson hardware "$hw" \
+          --argjson last_update "$last_update" --argjson hardware "$hw" --argjson results "$results" \
           '{$hostname, $serial, $profile, $current_rev, $nixos_version, $uptime_s, $last_update}
-           + (if $hardware == null then {} else {$hardware} end)' |
+           + (if $hardware == null then {} else {$hardware} end)
+           + (if ($results | length) == 0 then {} else {action_results: $results} end)' |
           post /api/v1/report -H @<(printf 'Authorization: Bearer %s\n' "$(< ${state}/device-token)")
       }
 
-      target=$(report | jq -r '.target_rev // empty')
-      # Compare with what the next boot runs (the system profile), not the running system: with
-      # applyMode=boot a staged update only becomes current after a reboot, and a ring moved back
-      # to the running revision must un-stage it.
-      next_boot=$(rev_of /nix/var/nix/profiles/system)
-      if [[ -z $target || $target == "$next_boot" ]]; then
-        if [[ -n $target && $target != "$(current_rev)" ]]; then echo "$target is staged; waiting for a reboot"; fi
-        exit 0
+      reply=$(report)
+      if $carried; then # the panel has them now
+        rm -f ${state}/pending-results.json
+        results='[]'
       fi
-      if [[ -z $flake || -z $group ]]; then
-        echo "panel wants $target, but no flake/group is configured; not applying" >&2
-        exit 0
-      fi
+      target=$(jq -r '.target_rev // empty' <<< "$reply")
 
-      ok=false
-      if nixos-rebuild ${cfg.applyMode} --flake "$flake?rev=$target#$group"; then ok=true; fi
-      jq -n --arg rev "$target" --argjson ok "$ok" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '{$rev, $ok, $at}' > ${state}/last-update.json
-      report > /dev/null
+      updated=false
+      stage_status=current # current | ok (just staged) | failed | noconfig
+      stage() {
+        # Compare with what the next boot runs (the system profile), not the running system: with
+        # applyMode=boot a staged update only becomes current after a reboot, and a ring moved back
+        # to the running revision must un-stage it.
+        local next_boot
+        next_boot=$(rev_of /nix/var/nix/profiles/system)
+        if [[ -z $target || $target == "$next_boot" ]]; then
+          if [[ -n $target && $target != "$(current_rev)" ]]; then echo "$target is staged; waiting for a reboot"; fi
+          return 0
+        fi
+        if [[ -z $flake || -z $group ]]; then
+          echo "panel wants $target, but no flake/group is configured; not applying" >&2
+          stage_status=noconfig
+          return 0
+        fi
+        local ok=false
+        if nixos-rebuild ${cfg.applyMode} --flake "$flake?rev=$target#$group"; then ok=true; stage_status=ok; else stage_status=failed; fi
+        jq -n --arg rev "$target" --argjson ok "$ok" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          '{$rev, $ok, $at}' > ${state}/last-update.json
+        updated=true
+      }
+      stage
+
+      # Nobody is logged in when no logind session has Class=user. If that can't be told, assume someone is.
+      idle() {
+        local sessions id class
+        sessions=$(loginctl list-sessions --no-legend 2>/dev/null) || return 1
+        while read -r id _; do
+          [[ -n $id ]] || continue
+          class=$(loginctl show-session "$id" --property=Class --value 2>/dev/null) || return 1
+          if [[ $class == user ]]; then return 1; fi
+        done <<< "$sessions"
+        return 0
+      }
+
+      reboot_now() { # reboot_now <id>: remember "done" across the reboot, then go
+        add_result "$1" "done" "rebooting"
+        jq -c . <<< "$results" > ${state}/pending-results.tmp
+        mv ${state}/pending-results.tmp ${state}/pending-results.json
+        sync
+        systemctl reboot --no-block
+        exit 0
+      }
+
+      actions=$(jq -r '[.actions[]? | select(type == "object" and (.id | type) == "string" and .id != "")]
+        | .[] | [.id, (.type | tostring), (.force == true)] | @tsv' <<< "$reply" 2>/dev/null || true)
+      while IFS=$'\t' read -r id type force; do
+        [[ -n $id ]] || continue
+        case $type in
+          reboot | update_now)
+            if [[ $type == update_now && $stage_status == failed ]]; then
+              add_result "$id" "failed" "the update could not be staged; see the PC's last update"
+            elif [[ $type == update_now && $stage_status == noconfig ]]; then
+              add_result "$id" "failed" "no flake/group configured on this PC; cannot update"
+            elif [[ $force == true ]] || idle; then
+              reboot_now "$id"
+            else
+              add_result "$id" "deferred" "someone is logged in"
+            fi
+            ;;
+          *) add_result "$id" "failed" "unknown action type" ;;
+        esac
+      done <<< "$actions"
+
+      # Tell the panel about the update and any action outcomes without waiting for the next timer run.
+      if $updated || [[ $results != '[]' ]]; then report > /dev/null; fi
     '';
   };
 in {

@@ -33,6 +33,17 @@ Log in as `student1`, `teacher1` or `itadmin` (the only admin) with the demo
 password `demo`. That password exists only in the demo configurations
 (`school-vm`, `demo-lab`).
 
+## Remote actions
+
+An organisation admin can press "Reboot when idle" or "Update now" for a PC in the panel. The panel
+hands the action to the PC in its check-in reply; the agent does it at that check-in:
+
+- It reboots only when no logind session has `Class=user`; otherwise it reports `deferred` and
+  retries at each check-in, unless the admin ticked "force".
+- "Update now" stages the ring's target version (as the normal update does), then reboots under the same rule.
+- The `done` result of a reboot is saved to `/var/lib/fleet-agent/pending-results.json` first and sent
+  at the first check-in after boot. Unknown action types are reported `failed`.
+
 ## See an update roll out
 
 `.#demo-image` is the school image installed on a disk (group `demo-lab`, PC
