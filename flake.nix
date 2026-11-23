@@ -75,6 +75,42 @@
       school = ./modules/school.nix;
     };
 
+    templates.school = {
+      path = ./examples/school;
+      description = "A school's fleet: lab and library PCs, students from a loop, staff from folders";
+    };
+
+    # `nix run .#new-user -- <name>` in a customer's fleet repo: one folder per person.
+    packages.${system}.new-user = pkgs.writeShellApplication {
+      name = "new-user";
+      text = ''
+        name=''${1:-}
+        if [[ ! $name =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+          echo "usage: nix run .#new-user -- <name>   (lower-case letters, digits, - and _)" >&2
+          exit 1
+        fi
+        [[ -f flake.nix && -d users ]] || { echo "run this from your fleet repo (next to flake.nix and users/)" >&2; exit 1; }
+        dir=users/$name
+        [[ ! -e $dir ]] || { echo "$dir already exists" >&2; exit 1; }
+        mkdir "$dir"
+        cat > "$dir/default.nix" <<EOF
+        # $name: merged into users.users.$name on every PC in the fleet.
+        {
+          description = "$name";
+          # extraGroups = ["wheel"]; # uncomment to make $name an administrator
+        }
+        EOF
+        echo "Created $dir/default.nix. Edit it, then: git add $dir && git commit"
+      '';
+    };
+
+    apps.${system} = {
+      new-user = {
+        type = "app";
+        program = lib.getExe self.packages.${system}.new-user;
+      };
+    };
+
     checks.${system} = {
       fleet = import ./tests/fleet.nix {inherit self pkgs;};
       school = import ./tests/school.nix {inherit self pkgs;};
