@@ -114,6 +114,13 @@
             {
               networking.hostName = "school-vm";
               users.users = lib.genAttrs ["student1" "teacher1" "itadmin"] (_: {initialPassword = "demo";});
+              # Reports to the live panel. The enrol token is read at runtime from the host's
+              # $SHARED_DIR (mounted at /tmp/shared), so it never enters git or the store.
+              codered.fleet.agent = {
+                enable = true;
+                url = "https://fleet.codered.lol";
+                enrollTokenFile = "/tmp/shared/enroll-token";
+              };
               virtualisation.vmVariant.virtualisation = {
                 memorySize = 4096;
                 cores = 2;
@@ -134,7 +141,12 @@
       };
       school-vm = {
         type = "app";
-        program = lib.getExe self.nixosConfigurations.school-vm.config.system.build.vm;
+        # A host session that exports LD_LIBRARY_PATH (e.g. for JACK) makes QEMU load libraries
+        # built against a different glibc, so drop it.
+        program = toString (pkgs.writeShellScript "school-vm" ''
+          unset LD_LIBRARY_PATH
+          exec ${lib.getExe self.nixosConfigurations.school-vm.config.system.build.vm} "$@"
+        '');
       };
     };
 
