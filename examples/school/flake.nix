@@ -8,24 +8,44 @@
     self,
     fleet,
   }: let
+    lib = fleet.inputs.nixpkgs.lib;
+    # Written by the CodeRed panel (it commits here); edit settings there, not by hand.
+    settings =
+      if builtins.pathExists ./fleet-settings.json
+      then lib.importJSON ./fleet-settings.json
+      else {};
+    # The panel serves this repo as a tarball, which has no `self.rev`, and adds `.fleet-rev`
+    # holding the commit SHA. Without a revision, PCs report "unknown" as their version.
+    rev =
+      self.rev
+      or self.dirtyRev
+      or (
+        if builtins.pathExists ./.fleet-rev
+        then lib.removeSuffix "\n" (lib.trim (builtins.readFile ./.fleet-rev))
+        else null
+      );
     # Settings shared by every group of PCs.
     common = {
       codered.fleet.agent = {
         enable = true;
-        url = "https://fleet.codered.example"; # your CodeRed panel
+        url = "https://fleet.codered.lol"; # the CodeRed panel
         enrollTokenFile = "/var/lib/fleet-agent/enroll-token"; # written at install
+        # TODO: once the agent has a `flakeUrlTemplate` option, set it to
+        # "https://fleet.codered.lol/api/v1/config/{rev}.tar.gz" so PCs fetch this config from
+        # the panel. Until then `flake` is the fallback.
         flake = "git+https://git.school.example/it/fleet"; # this repository
       };
     };
-    homepage = url: {programs.firefox.policies.Homepage.URL = url;};
+    # mkForce: a group's own homepage beats the panel-wide one in fleet-settings.json.
+    homepage = url: {programs.firefox.policies.Homepage.URL = lib.mkForce url;};
   in {
     # One image per group of PCs, not per PC.
     nixosConfigurations = fleet.lib.mkFleet {
-      rev = self.rev or self.dirtyRev or null;
+      inherit rev settings;
       groups = {
         lab = {
           profile = "school";
-          modules = [common (homepage "https://www.school.example/")];
+          modules = [common]; # homepage comes from fleet-settings.json
         };
         library = {
           profile = "school";

@@ -1,0 +1,8 @@
+{
+  "homepage": "https://www.school.example/",
+  "usbStorage": false,
+  "timezone": "Australia/Perth",
+  "wifi": [{ "ssid": "SchoolNet", "psk": "change-me-please" }],
+  "printers": [{ "name": "Library", "uri": "ipp://10.0.0.5/ipp/print" }],
+  "generate": { "student": 30 }
+}

@@ -1,0 +1,8 @@
+{
+  "homepage": "https://portal.school.example/",
+  "usbStorage": true,
+  "timezone": "Australia/Sydney",
+  "wifi": [{ "ssid": "SchoolNet", "psk": "correct horse battery" }],
+  "printers": [{ "name": "Library", "uri": "ipp://10.0.0.5/ipp/print" }],
+  "generate": { "student": 3 }
+}

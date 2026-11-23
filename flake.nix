@@ -44,11 +44,103 @@
 
       # One nixosSystem per group of PCs (never per PC): every machine in a
       # group shares one closure; its name and identity come at enrolment.
+      #
+      # `settings` is the data a panel writes (fleet-settings.json, see README "Settings"):
+      # it is validated, then applied to every group at normal priority, so a group's own
+      # `modules` still win (with mkForce where they need to beat another normal-priority value).
       mkFleet = {
         groups,
         users ? {},
         rev ? null,
-      }:
+        settings ? {},
+      }: let
+        fail = msg: throw "mkFleet: fleet-settings: ${msg}";
+        known = ["homepage" "usbStorage" "timezone" "wifi" "printers" "generate"];
+        isStr = builtins.isString;
+        entryOf = fields: where: e:
+          if !(builtins.isAttrs e)
+          then fail "`${where}` must be an object"
+          else
+            (map (f:
+              if !(e ? ${f}) || !(isStr e.${f})
+              then fail "`${where}.${f}` must be a string"
+              else null)
+            fields)
+            ++ (map (k:
+              if !(builtins.elem k fields)
+              then fail "`${where}` has unknown key `${k}`"
+              else null)
+            (builtins.attrNames e));
+        listOf = key: fields:
+          if !(builtins.isList settings.${key})
+          then fail "`${key}` must be a list"
+          else lib.imap0 (i: entryOf fields "${key}[${toString i}]") settings.${key};
+        validated =
+          builtins.deepSeq [
+            (
+              if !(builtins.isAttrs settings)
+              then fail "must be an object"
+              else
+                map (k:
+                  if builtins.elem k known
+                  then null
+                  else fail "unknown key `${k}` (known: ${lib.concatStringsSep ", " known})") (builtins.attrNames settings)
+            )
+            (map (k:
+              if settings ? ${k} && !(isStr settings.${k})
+              then fail "`${k}` must be a string"
+              else null) ["homepage" "timezone"])
+            (lib.optional (settings ? usbStorage && !(builtins.isBool settings.usbStorage)) (fail "`usbStorage` must be true or false"))
+            (lib.optionals (settings ? wifi) (listOf "wifi" ["ssid" "psk"]))
+            (lib.optionals (settings ? printers) (listOf "printers" ["name" "uri"]))
+            (lib.optionals (settings ? printers) (map (p:
+              if builtins.match "[A-Za-z0-9_-]+" p.name == null
+              then fail "printer name `${p.name}` is not CUPS-safe (letters, digits, _ and - only)"
+              else null)
+            settings.printers))
+            (lib.optional (settings ? generate && !(builtins.isAttrs settings.generate && lib.all (n: builtins.isInt n && n >= 0) (builtins.attrValues settings.generate)))
+              (fail "`generate` must map a prefix to a non-negative count, e.g. {\"student\": 30}"))
+          ]
+          null;
+        settingsModule.config = lib.mkMerge [
+          (lib.optionalAttrs (settings ? homepage) {programs.firefox.policies.Homepage.URL = settings.homepage;})
+          (lib.optionalAttrs (settings ? usbStorage) {codered.fleet.school.allowUsbStorage = settings.usbStorage;})
+          (lib.optionalAttrs (settings ? timezone) {time.timeZone = settings.timezone;})
+          (lib.optionalAttrs (settings ? wifi) {
+            networking.networkmanager.ensureProfiles.profiles = builtins.listToAttrs (map (w:
+              lib.nameValuePair w.ssid {
+                connection = {
+                  id = w.ssid;
+                  type = "wifi";
+                  autoconnect = true;
+                };
+                wifi = {
+                  ssid = w.ssid;
+                  mode = "infrastructure";
+                };
+                wifi-security = {
+                  key-mgmt = "wpa-psk";
+                  psk = w.psk;
+                };
+                ipv4.method = "auto";
+                ipv6.method = "auto";
+              })
+            settings.wifi);
+          })
+          (lib.optionalAttrs (settings ? printers && settings.printers != []) {
+            services.printing.enable = true;
+            hardware.printers.ensurePrinters =
+              map (p: {
+                name = p.name;
+                deviceUri = p.uri;
+                model = "everywhere";
+              })
+              settings.printers;
+          })
+        ];
+        allUsers = users // {generate = (users.generate or {}) // (settings.generate or {});};
+      in
+        builtins.seq validated
         lib.mapAttrs (name: group:
           lib.nixosSystem {
             modules =
@@ -57,7 +149,8 @@
                 ./modules/base.nix
                 self.nixosModules.agent
                 self.nixosModules.${group.profile}
-                (self.lib.mkUsers users)
+                (self.lib.mkUsers allUsers)
+                settingsModule
                 {
                   codered.fleet.agent.group = name;
                   codered.fleet.agent.profile = lib.mkDefault group.profile;
@@ -195,6 +288,7 @@
       school = import ./tests/school.nix {inherit self pkgs;};
       agent-hardware = import ./tests/agent-hardware.nix {inherit self pkgs;};
       agent-actions = import ./tests/agent-actions.nix {inherit self pkgs;};
+      settings = import ./tests/settings.nix {inherit self pkgs;};
     };
   };
 }
