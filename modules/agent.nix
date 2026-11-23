@@ -52,11 +52,12 @@
         echo "enrolled with $url"
       fi
 
-      current_rev() { # of the running system, so it changes after a switch or reboot
+      rev_of() { # rev_of <system>: the revision it was built from
         local rev
-        rev=$(/run/current-system/sw/bin/nixos-version --configuration-revision 2>/dev/null || true)
+        rev=$("$1"/sw/bin/nixos-version --configuration-revision 2>/dev/null || true)
         echo "''${rev:-unknown}"
       }
+      current_rev() { rev_of /run/current-system; } # changes after a switch or reboot
 
       report() {
         local last_update=null
@@ -71,17 +72,16 @@
       }
 
       target=$(report | jq -r '.target_rev // empty')
-      if [[ -z $target || $target == "$(current_rev)" ]]; then
+      # Compare with what the next boot runs (the system profile), not the running system: with
+      # applyMode=boot a staged update only becomes current after a reboot, and a ring moved back
+      # to the running revision must un-stage it.
+      next_boot=$(rev_of /nix/var/nix/profiles/system)
+      if [[ -z $target || $target == "$next_boot" ]]; then
+        if [[ -n $target && $target != "$(current_rev)" ]]; then echo "$target is staged; waiting for a reboot"; fi
         exit 0
       fi
       if [[ -z $flake || -z $group ]]; then
         echo "panel wants $target, but no flake/group is configured; not applying" >&2
-        exit 0
-      fi
-      # With applyMode=boot a staged update only becomes current after a reboot.
-      if [[ -s ${state}/last-update.json ]] &&
-        jq -e --arg rev "$target" '.rev == $rev and .ok' ${state}/last-update.json > /dev/null; then
-        echo "$target is already staged; waiting for a reboot"
         exit 0
       fi
 
