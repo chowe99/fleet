@@ -89,7 +89,7 @@ The panel hosts each customer's config repo and serves any commit as a tarball a
 PC's device token). Set `codered.fleet.agent.flakeUrlTemplate = "https://<panel>/api/v1/config/{rev}.tar.gz"`
 and an update runs `nixos-rebuild <applyMode> --flake "<template with {rev} replaced>#<group>"`. The
 template takes precedence over `flake`; with it unset the old `<flake>?rev=<rev>#<group>` path is used.
-The agent rejects target revisions that are not 7-40 lowercase hex characters.
+The agent rejects target revisions that are not 6-40 lowercase hex characters.
 
 After enrolment (and on every run, so token changes follow) the agent writes
 `/var/lib/fleet-agent/netrc` (`machine <panel host> login device password <token>`, root-only, mode

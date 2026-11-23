@@ -180,7 +180,7 @@
           return 0
         fi
         local ok=false src
-        if [[ ! $target =~ ^[0-9a-f]{7,40}$ ]]; then
+        if [[ ! $target =~ ^[0-9a-f]{6,40}$ ]]; then
           echo "panel sent an invalid target revision; not applying" >&2
           stage_status=failed
           return 0
