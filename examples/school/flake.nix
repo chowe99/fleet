@@ -2,7 +2,7 @@
   description = "Our school's PCs, managed with CodeRed Fleet";
 
   # CodeRed gives you this URL when your service starts.
-  inputs.fleet.url = "git+https://git.howse.top/cod/fleet";
+  inputs.fleet.url = "github:chowe99/fleet";
 
   outputs = {
     self,
