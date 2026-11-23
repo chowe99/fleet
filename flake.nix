@@ -289,6 +289,7 @@
       agent-hardware = import ./tests/agent-hardware.nix {inherit self pkgs;};
       agent-actions = import ./tests/agent-actions.nix {inherit self pkgs;};
       settings = import ./tests/settings.nix {inherit self pkgs;};
+      agent-config-fetch = import ./tests/agent-config-fetch.nix {inherit self pkgs;};
     };
   };
 }
