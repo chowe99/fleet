@@ -244,6 +244,7 @@
           modules = [
             {
               networking.hostName = "demo-lab-01";
+              codered.fleet.hardening.level = "intermediary";
               users.users = lib.genAttrs ["student1" "teacher1" "itadmin"] (_: {initialPassword = "demo";});
               # The enrol token comes in over QEMU fw_cfg
               # (-fw_cfg name=opt/codered/enroll-token,file=<token>), so it never enters git or the store.
