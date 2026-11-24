@@ -1,6 +1,7 @@
 # What makes a group's image installable on common business PCs: UEFI
 # systemd-boot, a disko layout and generic hardware support. Used by mkFleet.
 {lib, ...}: {
+  imports = [./hardening.nix];
   nixpkgs.hostPlatform = lib.mkDefault "x86_64-linux";
   system.stateVersion = lib.mkDefault "26.05";
 

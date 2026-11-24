@@ -21,6 +21,8 @@
     })} $dir/metadata.json
   '';
 in {
+  imports = [./hardening.nix];
+
   services.desktopManager.plasma6.enable = true;
   services.displayManager.sddm.enable = true;
   networking.networkmanager.enable = true;
