@@ -162,6 +162,18 @@
               ++ group.modules or [];
           })
         groups;
+
+      # The unattended installer for one group (README "Install PCs"): a NixOS system whose
+      # `config.system.build.installerImage` holds `fleet-installer.raw`, a UEFI disk image for a USB stick
+      # that carries the whole group. `target` is one group from mkFleet; `modules` configure the installer
+      # (e.g. `codered.fleet.installer.panelWait`).
+      mkInstaller = {
+        target,
+        modules ? [],
+      }:
+        lib.nixosSystem {
+          modules = [./modules/installer.nix {codered.fleet.installer.target = target;}] ++ modules;
+        };
     };
 
     nixosModules = {
@@ -206,6 +218,9 @@
 
       # demo-lab as a raw UEFI disk (main.raw): systemd-boot and its own /nix/store.
       demo-image = self.nixosConfigurations.demo-lab.config.system.build.diskoImages;
+
+      # The USB-stick installer for demo-lab (fleet-installer.raw; README "Install PCs").
+      demo-lab-installer = (self.lib.mkInstaller {target = self.nixosConfigurations.demo-lab;}).config.system.build.installerImage;
     };
 
     # The school image as a QEMU VM. Demo password only here, never in lib.
