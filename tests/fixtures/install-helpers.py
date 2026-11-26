@@ -16,6 +16,15 @@ os.makedirs(WORK, exist_ok=True)
 ESP_TYPE = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 MSDATA_TYPE = "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"  # Microsoft basic data (Windows' C: drive)
 
+# A PC with a TPM has firmware that knows it. nixpkgs' default OVMF (OVMF_CODE above) is built without TPM
+# support, so systemd-boot tells the OS the firmware has no TPM (LoaderTpm2ActivePcrBanks=0) and
+# `systemd-analyze has-tpm2` reports only partial support: the encryption module then rightly refuses to
+# depend on the TPM and never finishes first boot. QEMU's own EDK2 build of the same OVMF, next to the
+# qemu-system-x86_64 on PATH, is built with TPM2 support; every PC here uses it, code and NVRAM alike.
+_QEMU_SHARE = os.path.join(os.path.dirname(os.path.realpath(shutil.which("qemu-system-x86_64"))), "..", "share", "qemu")
+PC_CODE = os.path.join(_QEMU_SHARE, "edk2-x86_64-code.fd")
+PC_VARS = os.path.join(_QEMU_SHARE, "edk2-i386-vars.fd")
+
 
 def run(*cmd, input=None):
     r = subprocess.run(cmd, input=input, capture_output=True, text=True)
@@ -151,11 +160,11 @@ def pc_command(name, internal=(), usb=(), tpm_sock=None, serial="FLEET-SN-0001")
     The test driver appends -serial stdio and -no-reboot, so a restart or power-off ends the QEMU process."""
     nvram = os.path.join(WORK, f"{name}-vars.fd")
     if not os.path.exists(nvram):
-        shutil.copy(OVMF_VARS, nvram)
+        shutil.copy(PC_VARS, nvram)
         os.chmod(nvram, 0o644)
     args = [
         "qemu-system-x86_64", "-enable-kvm", "-machine", "q35", "-cpu", "max", "-m", "3072", "-smp", "2",
-        "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_CODE}",
+        "-drive", f"if=pflash,format=raw,readonly=on,file={PC_CODE}",
         "-drive", f"if=pflash,format=raw,file={nvram}",
         "-smbios", f"type=1,manufacturer=Fakeco,product=Example Desk,serial={serial}",
         "-nic", "user,model=virtio-net-pci",
