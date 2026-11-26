@@ -98,8 +98,8 @@ removed would stop at a password prompt on every boot.
 **Recovery-key escrow.** The key exists in plaintext only in the memory of `fleet-encryption`: it is
 never logged, written to disk, or passed on a command line. While the panel cannot take it (offline,
 an error), the service keeps it in memory and retries every minute; the image key stays meanwhile. If
-the PC restarts before the panel confirmed it, that key was never known to anyone: its keyslot is
-removed and a new key made. The panel stores the latest key per `luks_uuid`.
+the PC restarts before the panel confirmed it, its keyslot is removed and a new key made and sent, so
+the panel can receive more than one key for a `luks_uuid`: only the most recent one is valid.
 
 **No TPM.** With the TPM off in the firmware (or a VM without one) nothing is changed: the disk stays
 unlocked by the shared image key, which protects nothing. The service logs this clearly and checks
