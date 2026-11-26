@@ -2,13 +2,13 @@
 # Builds the disks a PC is made of on the test host and the QEMU command lines that boot them.
 # The test sets OVMF_CODE, OVMF_VARS and puts the tools on PATH before including this file.
 import hashlib
-import json
+import json  # noqa: F811 (the test script imports it too; this file also runs on its own)
 import os
 import shlex
 import shutil
-import subprocess
+import subprocess  # noqa: F811 (the test script imports it too; this file also runs on its own)
 import tempfile
-import time
+import time  # noqa: F811 (the test script imports it too; this file also runs on its own)
 
 WORK = os.path.join(os.getcwd(), "installer-test")
 os.makedirs(WORK, exist_ok=True)
