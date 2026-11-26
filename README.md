@@ -12,7 +12,9 @@ from one flake.
 | `modules/base.nix` | installable image: UEFI systemd-boot, disko layout, generic hardware |
 | `modules/desktop.nix` | `nixosModules.desktop`: Plasma 6 with a bottom taskbar, start menu and pinned apps (`desktop-layout.js`), LibreOffice, en_AU |
 | `modules/school.nix` | `nixosModules.school`: desktop plus lockdown (no sudo/nix for non-admins, USB storage blocked, Firefox policies, KDE Kiosk, screen lock, no app store) |
-| `modules/agent.nix` | `nixosModules.agent` (`codered.fleet.agent`): enrols with the panel, reports, applies target revisions |
+| `modules/agent.nix` | `nixosModules.agent` (`codered.fleet.agent`): enrols with the panel, reports, applies target revisions, remote actions (reboot, update, lock, unlock, wipe) |
+| `modules/encryption.nix` | `nixosModules.encryption` (`codered.fleet.encryption`): LUKS2 root, TPM2 unlock, recovery key escrowed with the panel |
+| `modules/image.key` | the images' LUKS key: public on purpose, replaced on each PC's first boot |
 | `examples/school/` | `templates.school`: what a customer's IT department gets |
 | `tests/` | acceptance tests (locked) |
 
@@ -43,6 +45,85 @@ hands the action to the PC in its check-in reply; the agent does it at that chec
 - "Update now" stages the ring's target version (as the normal update does), then reboots under the same rule.
 - The `done` result of a reboot is saved to `/var/lib/fleet-agent/pending-results.json` first and sent
   at the first check-in after boot. Unknown action types are reported `failed`.
+
+For a lost or stolen PC:
+
+- **Lock** ends every non-root session and refuses every login but root's (console, display manager,
+  SSH) until **Unlock**. It survives reboots: the state is `/var/lib/fleet-agent/locked`, and
+  `fleet-lock.service` re-creates `/run/nologin` at boot, before the login prompts start. Logins are
+  refused by `pam_nologin`, which NixOS does not ship in its PAM stacks; the agent module adds it first
+  in the account stack of `login` (which sddm, sddm-autologin and gdm include), `sshd`, lightdm and
+  greetd. Root stays usable as the break-glass account. Every report carries `"locked": true|false`.
+- **Wipe** destroys every LUKS keyslot of the encrypted root (`cryptsetup erase`), then powers the PC
+  off. Without the keys the data is unreadable for good, and the PC no longer boots: reinstall it from
+  the image. It is refused (`failed`, with the reason) unless the PC is built with
+  `codered.fleet.agent.allowWipe = true` (off by default), has `codered.fleet.encryption` on, and is
+  locked. The agent reports `done` first and wipes only once the panel has that report; if the report
+  does not get through, nothing is wiped and the panel sends the action again.
+
+## Disk encryption
+
+`codered.fleet.encryption.enable = true` (on in `demo-lab`) gives a PC a LUKS2-encrypted root that
+unlocks through the TPM2 with no password, plus a recovery key held by the panel, much like BitLocker.
+
+**How it works.** The image (`.#demo-image`, built by disko) formats the root partition as LUKS2 with
+the image key, `modules/image.key`. That key is **not secret**: it is in the repo, the Nix store, the
+initrd and every image, and every PC flashed from one image shares it (and, until first boot, the same
+volume key). On the first boot the initrd opens the disk with it, without a password, and
+`fleet-encryption.service` then, in this order:
+
+1. replaces the volume key by online re-encryption of the mounted root (`cryptsetup reencrypt`): the
+   PC stays usable, and progress is kept in the LUKS2 header, so after a crash or power cut it resumes
+   where it stopped. On a laptop it waits for mains power;
+2. enrols the TPM2 (`systemd-cryptenroll --tpm2-pcrs=7`) and proves the TPM really unlocks the disk;
+3. makes a recovery key (`systemd-cryptenroll --recovery-key`) and checks it opens the disk;
+4. escrows it: `POST /api/v1/escrow` with the agent's device token, body
+   `{"recovery_key": "...", "luks_uuid": "..."}`, expecting `200 {"ok": true}`;
+5. only then removes the image key, and checks it no longer opens the disk.
+
+Each step is idempotent and checked against the LUKS2 header (`cryptsetup luksDump /dev/...` shows a
+`codered-fleet` token with the progress). Until step 5 the image key keeps working, so a failure at any
+step leaves the PC bootable exactly as it came. The service retries every minute until it is done;
+on later boots it checks, logs one line and exits.
+
+Later boots unlock through the TPM2. If the TPM refuses (see below), the boot screen asks for the
+recovery key, as often as needed: IT reads it from the panel.
+
+**Unlock order at boot.** `fleet-image-key.service` (initrd) tries the image key once, with no prompt;
+then `systemd-cryptsetup` tries the TPM2 token, then asks for the recovery key. The image key is
+deliberately not the crypttab key file: when `tpm2-device=` is set, systemd-cryptsetup reads a key file
+as a TPM2-sealed blob and never looks at the TPM2 token in the header, so a PC whose image key had been
+removed would stop at a password prompt on every boot.
+
+**Recovery-key escrow.** The key exists in plaintext only in the memory of `fleet-encryption`: it is
+never logged, written to disk, or passed on a command line. While the panel cannot take it (offline,
+an error), the service keeps it in memory and retries every minute; the image key stays meanwhile. If
+the PC restarts before the panel confirmed it, that key was never known to anyone: its keyslot is
+removed and a new key made. The panel stores the latest key per `luks_uuid`.
+
+**No TPM.** With the TPM off in the firmware (or a VM without one) nothing is changed: the disk stays
+unlocked by the shared image key, which protects nothing. The service logs this clearly and checks
+again every minute, so turning on the TPM (fTPM on AMD, PTT on Intel) later finishes the setup without
+a reinstall. A PC is never left without a working way in.
+
+**PCR 7.** The disk key is sealed to PCR 7, the Secure Boot policy: whether Secure Boot is on and its
+keys. Unlike the PCRs that measure the firmware, bootloader or kernel, it does not change when NixOS,
+the kernel or systemd-boot update, so updates never trigger the recovery screen. Turning Secure Boot on
+or off, changing its keys, or a firmware/dbx update that changes them does: enter the recovery key,
+then re-enrol (`systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrs=7 <device>`).
+
+**Honest limits.**
+
+- Without Secure Boot, PCR 7 only records "Secure Boot is off", so the TPM will release the key to any
+  OS booted on that PC. Encryption protects a disk taken out of its PC (a stolen or disposed drive);
+  it does not stop someone booting a USB stick on the stolen PC itself and unlocking it with the TPM.
+  The fixes are a TPM+PIN mode (follow-up) and Secure Boot with lanzaboote (phase 2), which makes
+  PCR 7 mean "our signed boot chain".
+- Until first boot finishes (and forever on a PC without a TPM) the disk opens with the public image key.
+- Lock and wipe act at the PC's next check-in (up to 15 minutes, sooner after a reboot), and only if it
+  reaches the panel. A thief who never connects it to a network is stopped only by the encryption.
+- Root can always log in on a locked PC: protect the root password like any admin credential.
+- A wipe destroys the keys, not the data area; without the keys it is unreadable ciphertext.
 
 ## See an update roll out
 
@@ -152,5 +233,5 @@ is future work.
 
 - Directory sign-in (Himmelblau / SSSD)
 - Web filtering
-- Secure Boot (Lanzaboote)
+- Secure Boot (Lanzaboote); TPM+PIN unlock
 - Installer and netboot images
