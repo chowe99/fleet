@@ -246,6 +246,8 @@
             {
               networking.hostName = "demo-lab-01";
               codered.fleet.hardening.level = "intermediary";
+              # LUKS2 root: TPM2 unlock and an escrowed recovery key after first boot (README "Disk encryption").
+              codered.fleet.encryption.enable = true;
               users.users = lib.genAttrs ["student1" "teacher1" "itadmin"] (_: {initialPassword = "demo";});
               # The enrol token comes in over QEMU fw_cfg
               # (-fw_cfg name=opt/codered/enroll-token,file=<token>), so it never enters git or the store.
