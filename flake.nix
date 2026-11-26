@@ -148,11 +148,13 @@
                 disko.nixosModules.disko
                 ./modules/base.nix
                 self.nixosModules.agent
+                self.nixosModules.fallback
                 self.nixosModules.${group.profile}
                 (self.lib.mkUsers allUsers)
                 settingsModule
                 {
                   codered.fleet.agent.group = name;
+                  codered.fleet.fallback.enable = lib.mkDefault true;
                   codered.fleet.agent.profile = lib.mkDefault group.profile;
                   system.configurationRevision = lib.mkIf (rev != null) rev;
                 }
@@ -166,6 +168,7 @@
       agent = ./modules/agent.nix;
       desktop = ./modules/desktop.nix;
       directory = ./modules/directory.nix;
+      fallback = ./modules/fallback.nix;
       hardening = ./modules/hardening.nix;
       school = ./modules/school.nix;
     };
