@@ -1,5 +1,5 @@
-# Device side of the fleet panel: enrol once, report on every run, and apply
-# the target revision the panel asks for.
+# Device side of the fleet panel: enrol once, report on every run, apply the
+# target revision the panel asks for, and carry out remote actions (README: "Remote actions").
 {
   config,
   lib,
@@ -9,6 +9,8 @@
   cfg = config.codered.fleet.agent;
   inherit (lib) mkOption types;
   state = "/var/lib/fleet-agent";
+  lockedFile = "${state}/locked"; # present while the panel has this PC locked
+  nologinText = "This PC has been locked by your IT administrator. Please contact them.";
   # Always single-quoted (lib.escapeShellArg leaves plain words bare).
   quote = s: "'${lib.replaceStrings ["'"] ["'\\''"] (toString s)}'";
 
@@ -21,6 +23,7 @@
       pkgs.util-linux # lscpu, the CPU-name fallback
       pkgs.gitMinimal
       pkgs.systemd # loginctl, systemctl
+      pkgs.cryptsetup # wipe
       config.nix.package
       config.programs.ssh.package
       config.system.build.nixos-rebuild
@@ -33,6 +36,8 @@
       flake=${quote cfg.flake}
       flake_template=${quote cfg.flakeUrlTemplate}
       group=${quote cfg.group}
+      allow_wipe=${lib.boolToString cfg.allowWipe}
+      wipe_device=${quote (lib.optionalString (cfg.encryptedDevice != null) cfg.encryptedDevice)}
       umask 077
 
       hostname=$(< /proc/sys/kernel/hostname)
@@ -139,8 +144,15 @@
           '. + [{$id, $status} + (if $detail == "" then {} else {detail: $detail[0:255]} end)] | .[-20:]' <<< "$results")
       }
 
+      # Locked: every login but root's is refused (pam_nologin reads /run/nologin) until "unlock".
+      # The state file survives reboots; fleet-lock.service puts /run/nologin back at boot.
+      is_locked() { [[ -e ${lockedFile} ]]; }
+      block_logins() { printf '%s\n' ${quote nologinText} > /run/nologin; }
+      if is_locked && [[ ! -e /run/nologin ]]; then block_logins; fi
+
       report() {
-        local hw
+        local hw locked=false
+        if is_locked; then locked=true; fi
         hw=$(hardware 2>/dev/null) || hw=null
         local last_update=null
         if [[ -s ${state}/last-update.json ]]; then last_update=$(< ${state}/last-update.json); fi
@@ -149,7 +161,8 @@
           --arg nixos_version "$(/run/current-system/sw/bin/nixos-version)" \
           --argjson uptime_s "$(cut -d. -f1 /proc/uptime)" \
           --argjson last_update "$last_update" --argjson hardware "$hw" --argjson results "$results" \
-          '{$hostname, $serial, $profile, $current_rev, $nixos_version, $uptime_s, $last_update}
+          --argjson locked "$locked" \
+          '{$hostname, $serial, $profile, $current_rev, $nixos_version, $uptime_s, $last_update, $locked}
            + (if $hardware == null then {} else {$hardware} end)
            + (if ($results | length) == 0 then {} else {action_results: $results} end)' |
           post /api/v1/report -H @<(printf 'Authorization: Bearer %s\n' "$(< ${state}/device-token)")
@@ -214,6 +227,54 @@
         exit 0
       }
 
+      # End every non-root user session (the display manager's greeter is not one).
+      end_sessions() {
+        local id uid class uids=() rc=0
+        while read -r id _; do
+          [[ -n $id ]] || continue
+          class=$(loginctl show-session "$id" --property=Class --value 2>/dev/null) || continue
+          uid=$(loginctl show-session "$id" --property=User --value 2>/dev/null) || continue
+          if [[ $class == user* && $uid != 0 ]]; then uids+=("$uid"); fi
+        done < <(loginctl list-sessions --no-legend 2>/dev/null || true)
+        for uid in $(printf '%s\n' "''${uids[@]}" | sort -u); do
+          loginctl terminate-user "$uid" || rc=1
+        done
+        return "$rc"
+      }
+
+      lock_now() { # lock_now <id>
+        date -u +%Y-%m-%dT%H:%M:%SZ > ${lockedFile}.tmp
+        mv ${lockedFile}.tmp ${lockedFile}
+        sync
+        block_logins
+        if end_sessions; then
+          add_result "$1" "done" "logins blocked and every session ended; root can still log in"
+        else
+          add_result "$1" "failed" "logins are blocked, but some sessions could not be ended; send lock again"
+        fi
+      }
+
+      unlock_now() { # unlock_now <id>
+        rm -f ${lockedFile} /run/nologin
+        sync
+        add_result "$1" "done" "logins allowed again"
+      }
+
+      # Wipe: report "done" first (the panel must know before the keys are gone; if that report fails,
+      # nothing is wiped and the action comes again), then destroy every LUKS keyslot, then power off.
+      wipe_now() { # wipe_now <id>
+        add_result "$1" "done" "destroying every disk key, then powering off"
+        report > /dev/null
+        if cryptsetup erase --batch-mode "$wipe_device"; then
+          echo "wiped: every keyslot of $wipe_device is destroyed; powering off"
+          sync
+          systemctl poweroff --no-block --check-inhibitors=no
+          exit 0
+        fi
+        results=$(jq -c --arg id "$1" 'map(select(.id != $id))' <<< "$results")
+        add_result "$1" "failed" "destroying the disk keys failed; the PC is NOT wiped"
+      }
+
       actions=$(jq -r '[.actions[]? | select(type == "object" and (.id | type) == "string" and .id != "")]
         | .[] | [.id, (.type | tostring), (.force == true)] | @tsv' <<< "$reply" 2>/dev/null || true)
       while IFS=$'\t' read -r id type force; do
@@ -228,6 +289,21 @@
               reboot_now "$id"
             else
               add_result "$id" "deferred" "someone is logged in"
+            fi
+            ;;
+          lock) lock_now "$id" ;;
+          unlock) unlock_now "$id" ;;
+          wipe)
+            if [[ $allow_wipe != true ]]; then
+              add_result "$id" "failed" "wiping is not allowed on this PC (codered.fleet.agent.allowWipe is off)"
+            elif [[ -z $wipe_device ]]; then
+              add_result "$id" "failed" "this PC has no disk encryption, so it cannot be wiped remotely"
+            elif ! is_locked; then
+              add_result "$id" "failed" "lock the PC before wiping it"
+            elif ! cryptsetup isLuks "$wipe_device" 2>/dev/null; then
+              add_result "$id" "failed" "the encrypted disk ($wipe_device) was not found"
+            else
+              wipe_now "$id"
             fi
             ;;
           *) add_result "$id" "failed" "unknown action type" ;;
@@ -280,11 +356,62 @@ in {
       default = "boot";
       description = "`boot` stages updates for the next reboot so nothing changes mid-lesson; `switch` applies them at once.";
     };
+    allowWipe = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Whether the panel's "wipe" action may destroy this PC's disk keys (only while the PC is locked,
+        and only with codered.fleet.encryption on). Off by default: a wipe cannot be undone.
+      '';
+    };
+    encryptedDevice = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      internal = true;
+      description = "The LUKS volume a wipe erases; set by codered.fleet.encryption.";
+    };
   };
 
   config = lib.mkIf cfg.enable {
     nix.settings.experimental-features = ["nix-command" "flakes"];
     nix.settings.netrc-file = "${state}/netrc";
+
+    # Remote lock: NixOS's PAM stacks have no pam_nologin, so add it first in the account stack (before
+    # any `sufficient` module could end it early). In account, not auth: the password is still asked
+    # for, then refused. sddm (and sddm-autologin, gdm) include `login`'s account stack.
+    security.pam.services = let
+      nologin = svc: {
+        rules.account.fleet-nologin = {
+          control = "required";
+          modulePath = "${config.security.pam.package}/lib/security/pam_nologin.so";
+          order =
+            lib.foldl' lib.min 10000 (map (r: r.order)
+              (lib.attrValues (removeAttrs config.security.pam.services.${svc}.rules.account ["fleet-nologin"])))
+            - 10;
+        };
+      };
+    in
+      lib.mkMerge [
+        {login = nologin "login";}
+        (lib.mkIf config.services.openssh.enable {sshd = nologin "sshd";})
+        (lib.mkIf config.services.xserver.displayManager.lightdm.enable {
+          lightdm = nologin "lightdm";
+          lightdm-autologin = nologin "lightdm-autologin";
+        })
+        (lib.mkIf config.services.greetd.enable {greetd = nologin "greetd";})
+      ];
+
+    # systemd-user-sessions removes /run/nologin at boot: put it back before anyone can log in.
+    systemd.services.fleet-lock = {
+      description = "Keep a remotely locked PC locked across reboots";
+      wantedBy = ["multi-user.target"];
+      wants = ["getty-pre.target"];
+      after = ["systemd-user-sessions.service"];
+      before = ["getty-pre.target" "display-manager.service" "sshd.service"];
+      unitConfig.ConditionPathExists = lockedFile;
+      serviceConfig.Type = "oneshot";
+      script = "printf '%s\\n' ${quote nologinText} > /run/nologin";
+    };
 
     systemd.services.fleet-agent = {
       description = "CodeRed Fleet agent";
