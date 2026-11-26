@@ -293,6 +293,7 @@
       settings = import ./tests/settings.nix {inherit self pkgs;};
       agent-config-fetch = import ./tests/agent-config-fetch.nix {inherit self pkgs;};
       hardening = import ./tests/hardening.nix {inherit self pkgs;};
+      directory = import ./tests/directory.nix {inherit self pkgs;};
     };
   };
 }
