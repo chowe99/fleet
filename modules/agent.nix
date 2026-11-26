@@ -179,6 +179,13 @@
           stage_status=noconfig
           return 0
         fi
+        # A revision the PC already fell back from (fleet-fallback) is not staged again; the panel's
+        # target has to move to a new revision.
+        if grep -qxF -- "$target" /var/lib/fleet-fallback/failed-revs 2>/dev/null; then
+          echo "$target failed to start on this PC and was abandoned; not staging it again" >&2
+          stage_status=failed
+          return 0
+        fi
         local ok=false src
         if [[ ! $target =~ ^[0-9a-f]{6,40}$ ]]; then
           echo "panel sent an invalid target revision; not applying" >&2
