@@ -295,6 +295,7 @@
       agent-config-fetch = import ./tests/agent-config-fetch.nix {inherit self pkgs;};
       hardening = import ./tests/hardening.nix {inherit self pkgs;};
       directory = import ./tests/directory.nix {inherit self pkgs;};
+      fallback = import ./tests/fallback.nix {inherit self pkgs;};
     };
   };
 }
