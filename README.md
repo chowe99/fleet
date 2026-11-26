@@ -211,6 +211,49 @@ configuration, so it lands in the world-readable Nix store (and the repo) on eve
 PC. Treat it as visible to any local user. Moving PSKs to a runtime-read secret file
 is future work.
 
+## Active Directory sign-in
+
+`self.nixosModules.directory` (off by default) joins a PC to an on-premises AD domain so staff and
+students sign in with their existing username and password. It uses SSSD (AD provider), adcli
+and Kerberos. Add it to a group's `modules`:
+
+```nix
+imports = [fleet.nixosModules.directory];
+codered.fleet.directory = {
+  enable = true;
+  domain = "school.example.edu";
+  joinUser = "svc-join";
+  joinPasswordFile = "/run/agenix/join-password"; # a runtime secret, never a store path
+  adminGroups = ["Fleet Admins"];                 # AD groups that get sudo
+  ntpServers = ["dc1.school.example.edu"];
+};
+```
+
+What the PC does: `fleet-directory-join.service` joins at boot, retries every 30 s until a domain
+controller answers, never blocks boot, and only rejoins when the keytab is missing or stale. Users sign
+in with the short name (`alice`), get a home folder on first sign-in, and can sign in again with cached
+credentials when no domain controller is reachable (after one online sign-in). The VM test
+`checks.x86_64-linux.directory` runs this against a real Samba AD domain controller.
+
+What an IT admin must provide:
+
+- **DNS** pointing at the domain controllers (DHCP option or `networking.nameservers`); the PC finds the DCs from SRV records.
+- **A join account** with only the delegated right to create computer objects in the target OU (`computerOu`), not a Domain Admin.
+- **The join password as a secret** file on the PC (agenix, sops, the panel). A path in the Nix store is world-readable: tests only.
+- **Time sync**: Kerberos fails with more than 5 minutes of clock skew. Set `ntpServers` to your DCs.
+- **Hostnames of 15 characters or fewer** (NetBIOS limit). Evaluation fails for a longer `networking.hostName`; for PCs named at install time the join service refuses and logs why.
+
+Decisions: `gpoAccessControl` defaults to `permissive` (GPO logon rights are evaluated and logged but not
+enforced), because enforcing against a freshly built domain can lock everyone out; move to `enforcing`
+once `journalctl -u sssd` shows no unexpected denials. Members of `adminGroups` get sudo, and because
+the school profile limits the sudo binary to `wheel`, this module lifts that limit when `adminGroups`
+is non-empty (sudoers still decides who may use it). DNS dynamic updates are off.
+
+Not covered yet: Entra ID (Himmelblau, separate work), Group Policy beyond logon rights, SMB home
+drives and mapped drives (pam_mount or autofs with Kerberos), 802.1X Wi-Fi with machine certificates,
+PaperCut. Tested only on a text console: SDDM and the lock screen have PAM services with home-folder
+creation enabled, but a graphical domain sign-in is not exercised by the VM test.
+
 ## Design
 
 - **One image per group, not per PC.** `mkFleet { groups = { lab = { profile = "school"; }; }; ... }`
@@ -227,11 +270,12 @@ is future work.
   minutes, and applies `target_rev` with `nixos-rebuild boot` by default, so a PC
   changes at its next restart, never mid-lesson.
 - **No passwords in the library.** In production, people sign in through the
-  school's directory: Entra ID via Himmelblau, or AD/LDAP via SSSD.
+  school's directory: AD via SSSD (`directory` module); Entra ID via Himmelblau is future work.
 
 ## Out of scope (for now)
 
-- Directory sign-in (Himmelblau / SSSD)
+- Entra ID sign-in (Himmelblau; Active Directory is covered, see below)
+- Group Policy, SMB home/mapped drives, 802.1X Wi-Fi with machine certificates, PaperCut (see "Active Directory")
 - Web filtering
 - Secure Boot (Lanzaboote); TPM+PIN unlock
 - Installer and netboot images

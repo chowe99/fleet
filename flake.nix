@@ -166,6 +166,7 @@
       agent = ./modules/agent.nix;
       desktop = ./modules/desktop.nix;
       encryption = ./modules/encryption.nix;
+      directory = ./modules/directory.nix;
       hardening = ./modules/hardening.nix;
       school = ./modules/school.nix;
     };
@@ -297,6 +298,7 @@
       agent-config-fetch = import ./tests/agent-config-fetch.nix {inherit self pkgs;};
       hardening = import ./tests/hardening.nix {inherit self pkgs;};
       encryption = import ./tests/encryption.nix {inherit self pkgs;};
+      directory = import ./tests/directory.nix {inherit self pkgs;};
     };
   };
 }
