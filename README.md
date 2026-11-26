@@ -212,7 +212,8 @@ What it does, in order, with every internal disk read-only until the last check 
    the public image key, as from `.#demo-image`, but with fresh partition, LUKS and file system UUIDs and
    a fresh volume key on each PC;
 6. copies the group from the stick (`nixos-install`), writes the enrol token to the group's
-   `codered.fleet.agent.enrollTokenFile` (mode 0600) and the hostname to `/etc/hostname`;
+   `codered.fleet.agent.enrollTokenFile` (mode 0600; not when that file is provided at run time, like
+   demo-lab's over QEMU fw_cfg) and the hostname to `/etc/hostname`;
 7. adds a firmware boot entry for the installed disk, puts it first and makes it the next boot, then
    restarts. The PC starts alone: it unlocks with the image key, enrols, and sets up its disk encryption
    (README "Disk encryption").
