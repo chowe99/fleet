@@ -21,7 +21,8 @@ MSDATA_TYPE = "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"  # Microsoft basic data (Wi
 # `systemd-analyze has-tpm2` reports only partial support: the encryption module then rightly refuses to
 # depend on the TPM and never finishes first boot. QEMU's own EDK2 build of the same OVMF, next to the
 # qemu-system-x86_64 on PATH, is built with TPM2 support; every PC here uses it, code and NVRAM alike.
-_QEMU_SHARE = os.path.join(os.path.dirname(os.path.realpath(shutil.which("qemu-system-x86_64"))), "..", "share", "qemu")
+_QEMU_BIN = shutil.which("qemu-system-x86_64") or "qemu-system-x86_64 is not on PATH"
+_QEMU_SHARE = os.path.join(os.path.dirname(os.path.realpath(_QEMU_BIN)), "..", "share", "qemu")
 PC_CODE = os.path.join(_QEMU_SHARE, "edk2-x86_64-code.fd")
 PC_VARS = os.path.join(_QEMU_SHARE, "edk2-i386-vars.fd")
 
