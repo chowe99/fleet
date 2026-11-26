@@ -401,35 +401,5 @@ in {
     };
 
     codered.fleet.agent.encryptedDevice = cfg.device;
-
-    # nixpkgs' systemd-boot builder (26.05) only ever makes a generation's main entry the default, so
-    # `<specialisation>/bin/switch-to-configuration boot` (and `nixos-rebuild boot --specialisation`)
-    # silently boots the parent configuration. When the configuration just installed is a
-    # specialisation, make its entry the default. A no-op for ordinary generations (fleet updates).
-    # The encryption VM test boots "a PC fresh from the image" this way.
-    boot.loader.systemd-boot.extraInstallCommands = let
-      esp =
-        if config.boot.loader.systemd-boot.xbootldrMountPoint != null
-        then config.boot.loader.systemd-boot.xbootldrMountPoint
-        else config.boot.loader.efi.efiSysMountPoint;
-      coreutils = "${pkgs.coreutils}/bin";
-    in ''
-      target=$(${coreutils}/readlink -f "''${1:-/nonexistent}" || true)
-      for link in /nix/var/nix/profiles/system-*-link; do
-        gen=''${link##*/system-}
-        gen=''${gen%-link}
-        for spec in "$link"/specialisation/*; do
-          [ -e "$spec" ] && [ "$(${coreutils}/readlink -f "$spec")" = "$target" ] || continue
-          entry="nixos-generation-$gen-specialisation-''${spec##*/}.conf"
-          conf=${quote esp}/loader/loader.conf
-          if [ -e ${quote esp}/loader/entries/"$entry" ] && [ -e "$conf" ]; then
-            ${pkgs.gnused}/bin/sed "s|^default .*|default $entry|" "$conf" > "$conf.tmp"
-            ${coreutils}/sync "$conf.tmp"
-            ${coreutils}/mv "$conf.tmp" "$conf"
-            echo "made $entry the default boot entry"
-          fi
-        done
-      done
-    '';
   };
 }

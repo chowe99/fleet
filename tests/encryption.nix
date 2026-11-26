@@ -153,6 +153,7 @@ in
       with subtest("first boot from the image unlocks with the image key, no password"):
           machine.succeed(f"touch {BASE}/escrow-down")
           machine.succeed("${encrypted}/bin/switch-to-configuration boot")
+          machine.succeed("bootctl set-default nixos-generation-1-specialisation-encrypted.conf")  # test only: boot the image's config
           machine.succeed("sync")
           machine.crash()
           machine.wait_for_unit("multi-user.target")
