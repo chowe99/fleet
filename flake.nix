@@ -303,6 +303,7 @@
       encryption = import ./tests/encryption.nix {inherit self pkgs;};
       directory = import ./tests/directory.nix {inherit self pkgs;};
       fallback = import ./tests/fallback.nix {inherit self pkgs;};
+      installer = import ./tests/installer.nix {inherit self pkgs;};
     };
   };
 }
