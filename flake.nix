@@ -165,6 +165,7 @@
     nixosModules = {
       agent = ./modules/agent.nix;
       desktop = ./modules/desktop.nix;
+      directory = ./modules/directory.nix;
       hardening = ./modules/hardening.nix;
       school = ./modules/school.nix;
     };
