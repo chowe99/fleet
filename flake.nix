@@ -167,6 +167,7 @@
     nixosModules = {
       agent = ./modules/agent.nix;
       desktop = ./modules/desktop.nix;
+      encryption = ./modules/encryption.nix;
       directory = ./modules/directory.nix;
       fallback = ./modules/fallback.nix;
       hardening = ./modules/hardening.nix;
@@ -249,6 +250,8 @@
             {
               networking.hostName = "demo-lab-01";
               codered.fleet.hardening.level = "intermediary";
+              # LUKS2 root: TPM2 unlock and an escrowed recovery key after first boot (README "Disk encryption").
+              codered.fleet.encryption.enable = true;
               users.users = lib.genAttrs ["student1" "teacher1" "itadmin"] (_: {initialPassword = "demo";});
               # The enrol token comes in over QEMU fw_cfg
               # (-fw_cfg name=opt/codered/enroll-token,file=<token>), so it never enters git or the store.
@@ -297,6 +300,7 @@
       settings = import ./tests/settings.nix {inherit self pkgs;};
       agent-config-fetch = import ./tests/agent-config-fetch.nix {inherit self pkgs;};
       hardening = import ./tests/hardening.nix {inherit self pkgs;};
+      encryption = import ./tests/encryption.nix {inherit self pkgs;};
       directory = import ./tests/directory.nix {inherit self pkgs;};
       fallback = import ./tests/fallback.nix {inherit self pkgs;};
     };
