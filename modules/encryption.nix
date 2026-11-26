@@ -45,7 +45,7 @@
     # through pipes from bash builtins, never argv, a file, or the journal.
     text = ''
       dev=${quote cfg.device}
-      image_key=${quote cfg.imageKeyFile}
+      image_key=${quote "${cfg.imageKeyFile}"} # interpolated, so the key file is in the closure
       url=${quote agent.url}
       pcrs=${quote pcrs}
       token_file=/var/lib/fleet-agent/device-token
