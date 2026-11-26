@@ -82,6 +82,40 @@ new version and boot into it. It reports to https://fleet.codered.lol
 
 `tests/e2e-update.sh <commit>` runs steps 1 to 4 headless against the panel.
 
+## When an update goes wrong
+
+A new version is a trial. After an update is staged, the PC starts it at the next restart, up to
+three times (`codered.fleet.fallback.tries`). A start counts as good only when the PC finishes
+booting and the units it cannot do without are running (by default the login screen and the fleet
+agent; `requiredUnits`). Then the version is kept and the PC runs it from then on. The module is on
+by default for every `mkFleet` group (`codered.fleet.fallback.enable`).
+
+If the new version fails, nobody needs to go to the PC:
+
+- A required unit failed: the PC restarts itself within seconds.
+- The PC is up but unhealthy, or the start never finishes (a service that hangs): it restarts itself
+  once `bootTimeout` (default 10 minutes from power-on) has passed without a good boot.
+- After the tries are used up, the boot menu skips that version and the PC starts the last good one.
+  It then marks the update as failed: the panel shows the PC's last update as not ok, the system is set
+  back to the version that works, and the agent does not stage that same revision again. To roll out a
+  fix, publish a new revision. (To retry the very same revision, delete its line from
+  `/var/lib/fleet-fallback/failed-revs` on the PC.)
+
+The last good version is never restarted by this: only a version still on trial can be abandoned, and
+once a version has booted good it stays good, whatever happens later.
+
+What still needs a visit:
+
+- A PC that hangs before the boot loader runs (firmware, a dead disk, a corrupt EFI partition).
+- A hang in the kernel or early boot with no hardware watchdog: the PC waits until someone presses
+  the power button. Where the PC has a hardware watchdog, systemd arms it once it is running, so a
+  frozen system restarts. A kernel panic restarts after 10 seconds.
+- A failure of the last good version itself (nothing older to go back to), or a trial whose boot
+  loader entry is damaged.
+- Problems the check cannot see: a version that boots and passes the check but is broken in some other
+  way is kept. Put what matters in `requiredUnits`.
+- It needs UEFI with systemd-boot (the fleet images use it). Without UEFI boot counting is off.
+
 ## Config hosted by the panel
 
 The panel hosts each customer's config repo and serves any commit as a tarball at
