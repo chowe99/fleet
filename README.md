@@ -8,13 +8,14 @@ from one flake.
 
 | Path | What |
 |------|------|
-| `flake.nix` | `lib.mkUsers`, `lib.mkFleet`, modules, template, `school-vm`, `demo-lab` + `demo-image`, checks |
+| `flake.nix` | `lib.mkUsers`, `lib.mkFleet`, `lib.mkInstaller`, modules, template, `school-vm`, `demo-lab` + `demo-image` + `demo-lab-installer`, checks |
 | `modules/base.nix` | installable image: UEFI systemd-boot, disko layout, generic hardware |
 | `modules/desktop.nix` | `nixosModules.desktop`: Plasma 6 with a bottom taskbar, start menu and pinned apps (`desktop-layout.js`), LibreOffice, en_AU |
 | `modules/school.nix` | `nixosModules.school`: desktop plus lockdown (no sudo/nix for non-admins, USB storage blocked, Firefox policies, KDE Kiosk, screen lock, no app store) |
 | `modules/agent.nix` | `nixosModules.agent` (`codered.fleet.agent`): enrols with the panel, reports, applies target revisions, remote actions (reboot, update, lock, unlock, wipe) |
 | `modules/encryption.nix` | `nixosModules.encryption` (`codered.fleet.encryption`): LUKS2 root, TPM2 unlock, recovery key escrowed with the panel |
 | `modules/image.key` | the images' LUKS key: public on purpose, replaced on each PC's first boot |
+| `modules/installer.nix`, `installer.sh` | the unattended USB-stick installer (`lib.mkInstaller`) |
 | `examples/school/` | `templates.school`: what a customer's IT department gets |
 | `tests/` | acceptance tests (locked) |
 
@@ -162,6 +163,78 @@ new version and boot into it. It reports to https://fleet.codered.lol
 5. **Rings:** promote `pilot` to send the same version to `everyone`.
 
 `tests/e2e-update.sh <commit>` runs steps 1 to 4 headless against the panel.
+
+## Install PCs
+
+`lib.mkInstaller { target = <one group from mkFleet>; }` builds a USB-stick installer for that group;
+`.#demo-lab-installer` is demo-lab's. The stick carries the whole group, so the install needs the network
+only to reach the panel. Nobody touches the keyboard.
+
+1. **Write the image** to a USB stick (at least the size of the image, a few GB):
+
+   ```sh
+   nix build .#demo-lab-installer
+   sudo dd if=result/fleet-installer.raw of=/dev/sdX bs=4M conv=fsync status=progress
+   ```
+
+   On Windows, use Rufus in "DD image" mode. Writing erases the stick.
+2. **Drop `fleet/install.json`** onto the stick's FAT partition (Windows shows it as `FLEET`; there is a
+   `fleet` folder with a README and an example):
+
+   ```json
+   {"enroll_token": "<panel > Settings > Enrol token>", "hostname": "office-07"}
+   ```
+
+   | Field | |
+   |-------|-|
+   | `enroll_token` | required; the installed PC enrols with it, and the installer checks it with the panel first |
+   | `hostname` | optional; written to `/etc/hostname`. Without it the PC takes its name from DHCP. One stick installs many PCs, so change it per PC or leave it out |
+   | `disk` | needed only when the PC has more than one internal disk: a name (`nvme0n1`, `sda`), a `/dev/...` path, or the disk's serial number |
+   | `reinstall` | `true` to install over a PC that already runs Fleet (it refuses otherwise) |
+
+   A PC prepared by the Windows migration script already has `fleet\install.json` on its own EFI system
+   partition; then the stick needs none. The stick's own file wins when both exist. In Notepad, save as
+   "All files", or the name becomes `install.json.txt`.
+3. **Boot the PC from the stick** with a network cable plugged in: the firmware's one-time boot menu
+   (F12, F11, F9 or Esc). UEFI only, and Secure Boot must be off (the installer is not signed yet).
+
+What it does, in order, with every internal disk read-only until the last check has passed:
+
+1. finds `fleet/install.json` (the stick first, then any FAT partition on the PC);
+2. picks the disk: the only internal disk, or the one `disk` names. USB disks and the stick itself are
+   never candidates;
+3. refuses if any internal disk already holds a Fleet install;
+4. tells the panel `installing` (`POST /api/v1/migration-status`, `{serial, status, detail}`, with
+   `Authorization: Bearer <enrol token>`), retrying for `codered.fleet.installer.panelWait` (default
+   5 minutes) while the panel does not answer. A 404 (the panel never saw this PC's Windows inventory)
+   is fine; a 401 is a refusal;
+5. wipes the disk and lays it out with the group's own disko layout (`modules/base.nix`): LUKS2 opened by
+   the public image key, as from `.#demo-image`, but with fresh partition, LUKS and file system UUIDs and
+   a fresh volume key on each PC;
+6. copies the group from the stick (`nixos-install`), writes the enrol token to the group's
+   `codered.fleet.agent.enrollTokenFile` (mode 0600) and the hostname to `/etc/hostname`;
+7. adds a firmware boot entry for the installed disk, puts it first and makes it the next boot, then
+   restarts. The PC starts alone: it unlocks with the image key, enrols, and sets up its disk encryption
+   (README "Disk encryption").
+
+If anything fails after `installing`, the panel gets `failed` with a short reason, the screen shows it,
+and the PC powers off after 5 minutes: its disk was being replaced, so it no longer starts Windows.
+
+**Refusals.** Each one leaves every disk exactly as it was, shows the reason on the screen for 30 seconds,
+then restarts, so a PC booted from the stick once comes back as Windows:
+
+| Cause | The screen says | The panel hears |
+|-------|-----------------|-----------------|
+| no `fleet/install.json` anywhere | "No fleet/install.json was found" (or "rename install.json.txt") | nothing |
+| `install.json` is not JSON, has no `enroll_token`, or a bad `hostname` | which of these | nothing |
+| the PC already runs Fleet | "This PC already runs CodeRed Fleet"; the restart goes straight into Fleet | nothing |
+| more than one internal disk and no `disk` | the disks to choose from | `failed`, listing them |
+| `disk` is not an internal disk, there is no internal disk, or it is too small | why | `failed`, with the reason |
+| the panel does not answer within `panelWait` | "Could not reach the panel at ..." | nothing (it cannot) |
+| the panel refuses the enrol token (401) | "The panel ... refused the enrol token" | nothing (the token was refused) |
+
+The installer prints on the screen; everything, including the detail of each step, also goes to the
+serial port.
 
 ## When an update goes wrong
 
@@ -312,4 +385,5 @@ creation enabled, but a graphical domain sign-in is not exercised by the VM test
 - Group Policy, SMB home/mapped drives, 802.1X Wi-Fi with machine certificates, PaperCut (see "Active Directory")
 - Web filtering
 - Secure Boot (Lanzaboote); TPM+PIN unlock
-- Installer and netboot images
+- Netboot (PXE) installs, and an installer staged on the Windows EFI system partition that fetches the group
+  over the network
