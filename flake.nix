@@ -320,6 +320,7 @@
       fallback = import ./tests/fallback.nix {inherit self pkgs;};
       installer = import ./tests/installer.nix {inherit self pkgs;};
       net-installer = import ./tests/net-installer.nix {inherit self pkgs;};
+      installer-screen = import ./tests/installer-screen.nix {inherit self pkgs;};
     };
   };
 }
