@@ -4,7 +4,7 @@
 import hashlib
 import json  # noqa: F811 (the test script imports it too; this file also runs on its own)
 import os
-import re
+import re  # noqa: F811 (the USB installer test imports it too; this file also runs on its own)
 import shlex
 import struct
 import shutil
