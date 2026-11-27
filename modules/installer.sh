@@ -1,6 +1,7 @@
 # The unattended installer (README "Install PCs"). modules/installer.nix puts the settings in front of this
 # file: panel_url panel_wait panel_wait_text group target_system disko_format disko_mount target_link
 # nar_size_file store_paths token_file write_token esp_label fixed_hostname refusal_pause failure_pause
+# net_mode cache_url cache_key
 #
 # Nobody touches the keyboard. Every check runs before any disk is touched: an install.json, a single
 # internal disk to install on (or the one install.json names), no Fleet install already on the PC, and the
@@ -56,10 +57,14 @@ trap on_exit EXIT
 
 udevadm settle --timeout=120 || true
 
-# The medium this installer runs from: the disk holding its store.
-store_part=$(findmnt -nro SOURCE /nix/.ro-store || true)
+# The medium this installer runs from: the disk holding its store. Not in net mode: there the store was
+# downloaded into RAM, and the only disks are the PC's own, among them the one whose EFI partition holds
+# installer.efi and fleet/install.json (what the Windows migration script staged), which is the install target.
 boot_disk=
-if [[ -n $store_part ]]; then boot_disk=$(lsblk -ndo PKNAME "$store_part" 2>/dev/null || true); fi
+if [[ $net_mode != true ]]; then
+  store_part=$(findmnt -nro SOURCE /nix/.ro-store || true)
+  if [[ -n $store_part ]]; then boot_disk=$(lsblk -ndo PKNAME "$store_part" 2>/dev/null || true); fi
+fi
 
 inventory=$(lsblk -J -b -d -o NAME,PATH,TYPE,RM,RO,TRAN,SIZE,MODEL,SERIAL)
 field() { # field <disk path> <lsblk column>
@@ -307,6 +312,34 @@ if ((size < need)); then
     "The disk $(describe "$target") is too small for $group: it needs at least $((need >> 30)) GiB."
 fi
 
+# --- net mode: the cache must have the group's system, signed by the group's key ---------------------------
+
+if [[ $net_mode == true ]]; then
+  say "checking that the binary cache at $cache_url has $group, signed by the group's key"
+  cache_ok=
+  for _ in 1 2 3; do
+    # Every path of the system's closure must be there and carry a signature from cache_key.
+    if cache_out=$(nix --extra-experimental-features nix-command store verify --no-contents --sigs-needed 1 \
+      --store "$cache_url" --trusted-public-keys "$cache_key" --connect-timeout 15 --recursive "$target_system" 2>&1 > /dev/null); then
+      cache_ok=1
+      break
+    fi
+    printf '%s\n' "$cache_out" | grep -v '^checking ' >> "$log" || true
+    [[ $cache_out == *untrusted* ]] && break # it answered: no point in asking again
+    sleep 5
+  done
+  if [[ -z $cache_ok ]]; then
+    cache_why=$(printf '%s\n' "$cache_out" | grep -v '^checking ' | head -n 1 | cut -c 1-160)
+    if [[ $cache_out == *untrusted* ]]; then
+      cache_why="its paths are not signed by the key in this installer ($cache_why)"
+    fi
+    refuse_and_report "the binary cache at $cache_url cannot supply $group: ${cache_why:-no answer}" \
+      "The binary cache at $cache_url cannot supply $group," \
+      "or it is not signed by the key this installer trusts." \
+      "${cache_why:-No answer.}"
+  fi
+fi
+
 # --- the panel says yes: install -------------------------------------------------------------------------
 
 target_desc=$(describe "$target")
@@ -366,11 +399,19 @@ ln -sfn "$target" "$target_link" # the group's own disko layout, aimed at this d
 detail "$disko_format" || failed "partitioning or formatting $target failed"
 detail "$disko_mount" || failed "mounting the new file systems failed"
 
-say "copying $group from the stick (this takes a few minutes)"
+if [[ $net_mode == true ]]; then
+  say "downloading $group from the binary cache (this takes a while)"
+  # Only the cache, and only paths signed by its key.
+  substituter_opts=(--option substituters "$cache_url" --option trusted-public-keys "$cache_key" --option require-sigs true
+    --option connect-timeout 30 --option fallback false)
+else
+  say "copying $group from the stick (this takes a few minutes)"
+  substituter_opts=(--option substituters "")
+fi
 copy_system() { # nixos-install, with its progress on the screen every 10%
   local total
   total=$(wc -l < "$store_paths")
-  nixos-install --system "$target_system" --root /mnt --no-root-passwd --no-channel-copy --option substituters "" 2>&1 |
+  nixos-install --system "$target_system" --root /mnt --no-root-passwd --no-channel-copy "${substituter_opts[@]}" 2>&1 |
     tee -a "$log" >(systemd-cat -t fleet-install) |
     awk -v total="$total" '/^copying path/ {
       n++; p = int(n * 100 / total) - int(n * 100 / total) % 10

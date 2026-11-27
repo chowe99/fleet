@@ -13,6 +13,7 @@
   config,
   lib,
   pkgs,
+  extendModules,
   ...
 }: let
   cfg = config.codered.fleet.installer;
@@ -32,6 +33,88 @@
   partitions = tcfg.disko.devices.disk.main.content.partitions or {};
   espLabel = lib.head (lib.mapAttrsToList (_: p: p.label) (lib.filterAttrs (_: p: p.type == "EF00") partitions) ++ ["disk-main-ESP"]);
   closure = pkgs.closureInfo {rootPaths = [tcfg.system.build.toplevel];};
+  # The two numbers the installer needs, as plain files that do not retain the group's closure
+  # (closureInfo's own output lists every store path, so it does).
+  closureFacts =
+    pkgs.runCommand "fleet-closure-facts" {
+      unsafeDiscardReferences.out = true;
+      __structuredAttrs = true;
+    } ''
+      mkdir $out
+      cp ${closure}/total-nar-size ${closure}/store-paths $out/
+    '';
+
+  # The network installer (installer.efi + www/). It is built from three evaluations of this module:
+  #   usb     the system as the USB stick has it (and where `system.build.netInstaller` lives);
+  #   stage2  the same system for the network: it carries itself but NOT the group (that comes from the
+  #           binary cache), has no initrd and runs from the squashfs stage 1 downloaded;
+  #   stage1  stage2 plus a tiny initrd that brings up the network and fetches stage 2. Only its kernel
+  #           and initrd are used, in installer.efi (a UKI), which has to fit beside Windows on a
+  #           100 MB EFI system partition.
+  netCfg = cfg.net;
+  netStage = cfg.mode != "usb"; # one of the network installer's two systems
+  netEnabled = netCfg.url != null;
+  noCtx = builtins.unsafeDiscardStringContext;
+  netUrl = lib.removeSuffix "/" netCfg.url;
+  cacheUrl = lib.removeSuffix "/" netCfg.cacheUrl;
+
+  stage2 = extendModules {
+    modules = [
+      {
+        codered.fleet.installer.mode = lib.mkForce "stage2";
+        boot.initrd.enable = lib.mkForce false;
+        boot.initrd.systemd.enable = lib.mkForce false;
+        # The kernel's own drivers load from the full module tree; the NIC stage 1 brought up keeps its
+        # firmware. No firmware package here: it is most of the size.
+        hardware.enableAllHardware = lib.mkForce false;
+        hardware.enableRedistributableFirmware = lib.mkForce false;
+      }
+    ];
+  };
+  stage2Toplevel = noCtx (toString stage2.config.system.build.toplevel);
+  stage2Store = stage2.config.system.build.fleetInstallerStore;
+  stage2Sha =
+    pkgs.runCommand "fleet-stage2-sha256" {} ''
+      sha256sum ${stage2Store} | cut -d' ' -f1 > $out
+    '';
+
+  # Network cards stage 1 can use (and virtio, for virtual PCs). No storage drivers: stage 1 never touches a disk.
+  stage1Nics = [
+    "virtio_pci" "virtio_net" "e1000" "e1000e" "igb" "igc" "ixgbe" "r8169" "tg3" "atlantic" "bnxt_en"
+    "alx" "atl1c" "sky2" "forcedeth" "r8152" "cdc_ether" "ax88179_178a" "xhci_pci" "xhci_hcd" "ehci_pci"
+  ];
+  curlSmall = pkgs.curlMinimal;
+  stage1Script = builtins.replaceStrings ["@url@"] [(lib.escapeShellArg netUrl)] (builtins.readFile ./net-stage1.sh);
+  stage1 = stage2.extendModules {
+    modules = [
+      ({config, ...}: {
+        codered.fleet.installer.mode = lib.mkOverride 40 "stage1"; # beats stage2's mkForce
+        boot.initrd.enable = lib.mkOverride 40 true;
+        hardware.enableRedistributableFirmware = lib.mkOverride 40 true; # only what the NIC modules ask for gets into the initrd
+        boot.initrd.includeDefaultModules = false;
+        boot.initrd.availableKernelModules = lib.mkForce stage1Nics;
+        boot.initrd.kernelModules = lib.mkForce ["loop" "overlay" "squashfs" "af_packet"];
+        boot.initrd.verbose = false;
+        boot.initrd.extraUtilsCommands = ''
+          copy_bin_and_libs ${curlSmall}/bin/curl
+        '';
+        boot.initrd.extraFiles."/etc/ssl/certs/ca-certificates.crt".source = pkgs.runCommand "ca-bundle.crt" {} "cp ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt $out";
+        boot.initrd.extraFiles."/fleet/stage2.sha256".source = stage2Sha;
+        boot.initrd.postDeviceCommands = stage1Script;
+        boot.initrd.postMountCommands = ''
+          for n in $(ls /sys/class/net); do
+            [ "$n" = lo ] && continue
+            ip addr flush dev "$n" 2>/dev/null
+            ip link set dev "$n" down 2>/dev/null
+          done
+        '';
+        boot.uki.settings.UKI = {
+          Cmdline = lib.mkForce "init=${stage2Toplevel}/init ${toString config.boot.kernelParams} nomodeset";
+          OSRelease = lib.mkForce "@${pkgs.writeText "os-release" "ID=fleet-installer\nNAME=\"CodeRed Fleet installer\"\n"}";
+        };
+      })
+    ];
+  };
 
   # A token file under one of these comes from somewhere at run time (fw_cfg, a secret manager), not the disk.
   runtimeToken = lib.any (p: lib.hasPrefix p agent.enrollTokenFile) ["/sys/" "/proc/" "/dev/" "/run/" "/tmp/"];
@@ -76,12 +159,19 @@
         panel_wait=${toString waitSeconds}
         panel_wait_text=${quote cfg.panelWait}
         group=${quote agent.group}
-        target_system=${tcfg.system.build.toplevel}
+        target_system=${
+          if netStage
+          then noCtx (toString tcfg.system.build.toplevel)
+          else tcfg.system.build.toplevel
+        }
         disko_format=${formatting.format}/bin/disko-format
         disko_mount=${formatting.mount}/bin/disko-mount
         target_link=${targetLink}
-        nar_size_file=${closure}/total-nar-size
-        store_paths=${closure}/store-paths
+        nar_size_file=${closureFacts}/total-nar-size
+        store_paths=${closureFacts}/store-paths
+        net_mode=${lib.boolToString netStage}
+        cache_url=${quote (lib.optionalString netEnabled cacheUrl)}
+        cache_key=${quote (lib.optionalString netEnabled netCfg.cachePublicKey)}
         token_file=${quote agent.enrollTokenFile}
         write_token=${lib.boolToString (!runtimeToken)}
         esp_label=${quote espLabel}
@@ -132,12 +222,49 @@
       cp $contents/registration nix-path-registration
       SOURCE_DATE_EPOCH=0 mksquashfs nix-path-registration $(cat $contents/store-paths) $out \
         -no-hardlinks -keep-as-directory -all-root -root-mode 0755 -b 1048576 -no-fragments \
-        -comp zstd -Xcompression-level 6 -processors $NIX_BUILD_CORES -quiet
+        -comp zstd -Xcompression-level ${
+        if netStage
+        then "19"
+        else "6"
+      } -processors $NIX_BUILD_CORES -quiet
     '';
   uki = "${config.system.build.uki}/${config.system.boot.loader.ukiFile}";
   espMiB = 512;
 in {
   options.codered.fleet.installer = {
+    mode = mkOption {
+      type = types.enum ["usb" "stage1" "stage2"];
+      default = "usb";
+      internal = true;
+      description = "Which of the installer's systems this evaluation is (see `net` below).";
+    };
+    net = {
+      url = mkOption {
+        type = types.nullOr (types.strMatching "https?://.+");
+        default = null;
+        example = "https://fleet.example.com/installer";
+        description = ''
+          Turns on the network installer: where the files in `system.build.netInstaller`'s `www/` are
+          published. installer.efi (copied to a Windows PC's EFI partition by the migration script) is small;
+          everything else it needs it downloads from here, checked against hashes built into it.
+        '';
+      };
+      cacheUrl = mkOption {
+        type = types.str;
+        default = lib.optionalString (cfg.net.url != null) "${lib.removeSuffix "/" cfg.net.url}/cache";
+        defaultText = lib.literalExpression ''"''${net.url}/cache"'';
+        description = ''
+          The binary cache holding the group's system (`nix copy --to` it, then `nix store sign`). The
+          installer takes the system from here, and only when `cachePublicKey` signed it.
+        '';
+      };
+      cachePublicKey = mkOption {
+        type = types.nullOr (types.strMatching "[^:[:space:]]+:[A-Za-z0-9+/=]+");
+        default = null;
+        example = "fleet-cache-1:AbC...=";
+        description = "The public half of the key (`nix key generate-secret`) the cache's paths are signed with.";
+      };
+    };
     target = mkOption {
       type = types.raw;
       internal = true;
@@ -159,6 +286,10 @@ in {
       {
         assertion = agent.enable;
         message = "lib.mkInstaller: the target group needs codered.fleet.agent (the installer checks the enrol token with its panel).";
+      }
+      {
+        assertion = cfg.net.url == null || cfg.net.cachePublicKey != null;
+        message = "codered.fleet.installer.net: set cachePublicKey (the public key the cache is signed with) together with url.";
       }
       {
         assertion = builtins.attrNames tcfg.disko.devices.disk == ["main"];
@@ -186,31 +317,49 @@ in {
       "systemd.gpt_auto=0" # never mount anything by itself
     ];
 
-    fileSystems = {
-      "/" = {
-        fsType = "tmpfs";
-        options = ["mode=0755"];
-      };
-      "/nix/.ro-store" = {
-        device = "/dev/disk/by-partlabel/fleet-installer-store";
-        fsType = "squashfs";
-        options = ["ro" "threads=multi"];
-        neededForBoot = true;
-      };
-      "/nix/.rw-store" = {
-        fsType = "tmpfs";
-        options = ["mode=0755"];
-        neededForBoot = true;
-      };
-      "/nix/store" = {
-        overlay = {
-          lowerdir = ["/nix/.ro-store"];
-          upperdir = "/nix/.rw-store/store";
-          workdir = "/nix/.rw-store/work";
+    fileSystems = lib.mkMerge [
+      (lib.mkIf (!netStage) {
+        "/" = {
+          fsType = "tmpfs";
+          options = ["mode=0755"];
         };
-        neededForBoot = true;
-      };
-    };
+        "/nix/.ro-store" = {
+          device = "/dev/disk/by-partlabel/fleet-installer-store";
+          fsType = "squashfs";
+          options = ["ro" "threads=multi"];
+          neededForBoot = true;
+        };
+      })
+      (lib.mkIf netStage {
+        # Stage 1 downloaded the store to /nix-store.squashfs (a relative device name, as in nixpkgs' netboot
+        # module, so stage 1 does not look for a block device).
+        "/" = {
+          fsType = "tmpfs";
+          options = ["mode=0755"];
+        };
+        "/nix/.ro-store" = {
+          device = "../nix-store.squashfs";
+          fsType = "squashfs";
+          options = ["loop" "ro" "threads=multi"];
+          neededForBoot = true;
+        };
+      })
+      {
+        "/nix/.rw-store" = {
+          fsType = "tmpfs";
+          options = ["mode=0755"];
+          neededForBoot = true;
+        };
+        "/nix/store" = {
+          overlay = {
+            lowerdir = ["/nix/.ro-store"];
+            upperdir = "/nix/.rw-store/store";
+            workdir = "/nix/.rw-store/work";
+          };
+          neededForBoot = true;
+        };
+      }
+    ];
 
     networking.useNetworkd = true;
     networking.useDHCP = true;
@@ -233,6 +382,20 @@ in {
     users.users.root.hashedPassword = "!"; # nobody logs in; there is nothing to do by hand
     documentation.enable = false;
     nix.settings.substituters = lib.mkForce [];
+    nix.settings.trusted-public-keys = lib.mkIf (netStage && netEnabled) (lib.mkForce [netCfg.cachePublicKey]);
+    system.build.fleetInstallerStore = storeImage;
+
+    # `system.build.netInstaller`: installer.efi, and www/ for `net.url`.
+    system.build.netInstaller = lib.mkIf (netEnabled && cfg.mode == "usb") (
+      pkgs.runCommand "fleet-net-installer" {
+        unsafeDiscardReferences.out = true; # files to publish, not store path users
+        __structuredAttrs = true;
+      } ''
+        mkdir -p $out/www
+        cp ${stage1.config.system.build.uki}/${stage1.config.system.boot.loader.ukiFile} $out/installer.efi
+        cp ${stage2Store} $out/www/stage2-$(cat ${stage2Sha}).squashfs
+      ''
+    );
 
     systemd.services.fleet-installer = {
       description = "CodeRed Fleet installer";
