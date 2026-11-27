@@ -237,6 +237,84 @@ then restarts, so a PC booted from the stick once comes back as Windows:
 The installer prints on the screen; everything, including the detail of each step, also goes to the
 serial port.
 
+### Installing over the network (the Windows migration script)
+
+The USB image carries the whole group (gigabytes), which does not fit on a Windows PC's own EFI system
+partition: Windows' is often 100 MB. The network installer is the same installer in two parts. The small
+part, `installer.efi` (a unified kernel image, at most 48 MiB), is what the migration script
+(`scripts/windows/fleet-migrate.ps1` in fleet-panel) copies to `\EFI\fleet\installer.efi` on the PC's own
+EFI partition, next to `fleet\install.json`, before it makes it the next boot only (BootNext) and restarts.
+The PC then runs from RAM and fetches the rest:
+
+1. **Its own files** from `net.url`, checked against a SHA-256 built into `installer.efi`. A wrong or
+   missing file is refused.
+2. **The group's system** from a binary cache at `net.cacheUrl`, and only when it is signed by
+   `net.cachePublicKey`. The installer checks the whole closure is there and signed before it wipes
+   anything.
+
+It then does everything the USB installer does (tells the panel `installing`, wipes and lays out the disk
+with the group's own disko layout, installs, sets the firmware to start the new system, restarts). Here the
+disk holding the EFI partition it booted from is the one it installs on; "never the boot medium" applies
+to the USB stick, not to this. It still refuses a PC that already runs Fleet, and USB disks.
+
+**Build it.** Set the options in the installer's `modules`:
+
+```nix
+installer = fleet.lib.mkInstaller {
+  target = self.nixosConfigurations.office;
+  modules = [{
+    codered.fleet.installer.net = {
+      url = "https://fleet.example.com/installer";       # where www/ is published
+      cachePublicKey = "fleet-cache-1:...=";              # nix key generate-secret / convert-secret-to-public
+      # cacheUrl = "https://cache.example.com";          # default: "<url>/cache"
+    };
+  }];
+};
+# installer.config.system.build.netInstaller is a directory: installer.efi and www/
+```
+
+**Publish `www/`** at `net.url`: copy its files (one squashfs, named by its hash) to any web server, so
+that `<net.url>/stage2-<hash>.squashfs` downloads. Plain HTTP is fine: the hash is built into
+`installer.efi`, not taken from the server (use HTTPS anyway for the cache, below, if it crosses a network
+you do not trust; the signature protects it either way). It is a few hundred MB and is read into the PC's
+RAM, so a PC needs about 3 GB of RAM or more (the installer itself keeps under 4 GB).
+
+**Fill and sign the cache** with the group's system (the closure of `target.config.system.build.toplevel`),
+on a machine that has it built. Do this again for every revision of the group you install new PCs from:
+
+```sh
+# once: the key. Keep the secret key private; its public half goes in net.cachePublicKey.
+nix key generate-secret --key-name fleet-cache-1 > fleet-cache.sec
+nix key convert-secret-to-public < fleet-cache.sec > fleet-cache.pub
+
+# each revision: copy the system into a cache directory, then sign it (all of its closure)
+top=$(nix build .#nixosConfigurations.office.config.system.build.toplevel --no-link --print-out-paths)
+nix copy --to 'file:///srv/fleet-cache?compression=zstd' "$top"
+nix store sign --store 'file:///srv/fleet-cache' --key-file fleet-cache.sec --recursive "$top"
+```
+
+Publish `/srv/fleet-cache` at `net.cacheUrl` (default `<net.url>/cache`, i.e. a `cache/` folder next to the
+installer's files). `nix copy --to s3://...` or any other binary cache works too, as long as the paths are
+signed with the key. Paths the cache lacks, or that are unsigned or signed by another key, make the
+installer report `failed` to the panel with the reason ("cache" in the detail) and restart; nothing is
+touched.
+
+**Refusals** are the table above, plus two that happen before any `install.json` is read, in the part that
+fits on the EFI partition:
+
+| Cause | The screen says | The panel hears |
+|-------|-----------------|-----------------|
+| no network (no wired card got an address by DHCP in 90 seconds) | "No network" | nothing (it does not know the panel yet) |
+| nothing at `net.url`, or the download does not match its built-in hash | what failed | nothing |
+| the cache lacks the system, or it is not signed by `cachePublicKey` | "The binary cache ... cannot supply ..." | `failed`, with "cache" and the reason |
+
+Each of them leaves every disk as it was, waits 30 seconds, and restarts. Because the migration script's
+one-time boot is used up by then and the installer sets no new one, the PC comes back as Windows.
+
+Limits: wired network cards only (a list of common drivers: Intel e1000e/igb/igc/ixgbe, Realtek r8169 and
+r8152 USB, Broadcom tg3/bnxt, Aquantia atlantic, and virtio); DHCP on every wired card in turn; UEFI with
+Secure Boot off, as for the USB stick.
+
 ## When an update goes wrong
 
 A new version is a trial. After an update is staged, the PC starts it at the next restart, up to
@@ -386,5 +464,4 @@ creation enabled, but a graphical domain sign-in is not exercised by the VM test
 - Group Policy, SMB home/mapped drives, 802.1X Wi-Fi with machine certificates, PaperCut (see "Active Directory")
 - Web filtering
 - Secure Boot (Lanzaboote); TPM+PIN unlock
-- Netboot (PXE) installs, and an installer staged on the Windows EFI system partition that fetches the group
-  over the network
+- Netboot (PXE, HTTP boot) installs: the network installer below is started from a PC's own EFI partition
