@@ -319,6 +319,7 @@
       directory = import ./tests/directory.nix {inherit self pkgs;};
       fallback = import ./tests/fallback.nix {inherit self pkgs;};
       installer = import ./tests/installer.nix {inherit self pkgs;};
+      net-installer = import ./tests/net-installer.nix {inherit self pkgs;};
     };
   };
 }

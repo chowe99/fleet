@@ -4,11 +4,14 @@
 import hashlib
 import json  # noqa: F811 (the test script imports it too; this file also runs on its own)
 import os
+import re
 import shlex
+import struct
 import shutil
 import subprocess  # noqa: F811 (the test script imports it too; this file also runs on its own)
 import tempfile
 import time  # noqa: F811 (the test script imports it too; this file also runs on its own)
+import uuid
 
 WORK = os.path.join(os.getcwd(), "installer-test")
 os.makedirs(WORK, exist_ok=True)
@@ -155,14 +158,68 @@ def start_swtpm(name):
     return proc, sock
 
 
+EFI_GLOBAL = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
+
+
+def nvram_of(pc):
+    """The PC's firmware NVRAM (boot entries), created from the firmware's template on first use."""
+    nvram = os.path.join(WORK, f"{pc}-vars.fd")
+    if not os.path.exists(nvram):
+        shutil.copy(PC_VARS, nvram)
+        os.chmod(nvram, 0o644)
+    return nvram
+
+
+def _ucs2(s):
+    return (s + "\0").encode("utf-16-le")
+
+
+def boot_next_file(pc, disk, path, description="CodeRed Fleet installer", number=0x0080):
+    """What the migration script's bcdedit calls do: a firmware boot entry for `path` on the disk's EFI system
+    partition (HD(...)/File(...) device path), made the next boot only (BootNext)."""
+    table = json.loads(run("sfdisk", "--json", disk))["partitiontable"]
+    p = next(p for p in table["partitions"] if p["type"].upper() == ESP_TYPE)
+    m = re.search(r"(\d+)$", p["node"])
+    assert m, p
+    num = int(m.group(1))
+    hd = struct.pack("<BBHIQQ", 4, 1, 42, num, p["start"], p["size"]) + uuid.UUID(p["uuid"]).bytes_le + bytes([2, 2])
+    f = _ucs2(path)
+    dp = hd + struct.pack("<BBH", 4, 4, 4 + len(f)) + f + struct.pack("<BBH", 0x7F, 0xFF, 4)
+    opt = struct.pack("<IH", 1, len(dp)) + _ucs2(description) + dp
+    j = os.path.join(WORK, "bootnext.json")
+    with open(j, "w") as fh:
+        json.dump({"version": 2, "variables": [
+            {"name": f"Boot{number:04X}", "guid": EFI_GLOBAL, "attr": 7, "data": opt.hex()},
+            {"name": "BootNext", "guid": EFI_GLOBAL, "attr": 7, "data": struct.pack("<H", number).hex()}]}, fh)
+    run("virt-fw-vars", "--inplace", nvram_of(pc), "--set-json", j)
+
+
+def boot_next(pc):
+    """The PC's BootNext entry number, or None when no one-time boot is pending."""
+    j = os.path.join(WORK, "vars-dump.json")
+    run("virt-fw-vars", "--input", nvram_of(pc), "--output-json", j)
+    with open(j) as fh:
+        for v in json.load(fh).get("variables", []):
+            if v["name"] == "BootNext" and v["guid"] == EFI_GLOBAL:
+                return struct.unpack("<H", bytes.fromhex(v["data"]))[0]
+    return None
+
+
+def stage_like_migration(pc, disk, installer_efi, config):
+    """What scripts/windows/fleet-migrate.ps1 (fleet-panel) leaves on a Windows PC before it restarts:
+    \\EFI\\fleet\\installer.efi and fleet/install.json on its own EFI partition, booted once."""
+    target = f"{disk}@@{esp_offset(disk)}"
+    with open(installer_efi, "rb") as fh:
+        fat_put(target, "EFI/fleet/installer.efi", fh.read())
+    fat_put(target, "fleet/install.json", json.dumps(config).encode())
+    boot_next_file(pc, disk, "\\EFI\\fleet\\installer.efi")
+
+
 def pc_command(name, internal=(), usb=(), tpm_sock=None, serial="FLEET-SN-0001"):
     """QEMU for one UEFI PC: USB sticks boot first (a technician picked the stick in the boot menu), then the
     internal NVMe disks. The firmware's NVRAM (boot entries) belongs to the PC and persists between starts.
     The test driver appends -serial stdio and -no-reboot, so a restart or power-off ends the QEMU process."""
-    nvram = os.path.join(WORK, f"{name}-vars.fd")
-    if not os.path.exists(nvram):
-        shutil.copy(PC_VARS, nvram)
-        os.chmod(nvram, 0o644)
+    nvram = nvram_of(name)
     args = [
         "qemu-system-x86_64", "-enable-kvm", "-machine", "q35", "-cpu", "max", "-m", "3072", "-smp", "2",
         "-drive", f"if=pflash,format=raw,readonly=on,file={PC_CODE}",
