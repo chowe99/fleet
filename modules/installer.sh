@@ -324,12 +324,14 @@ if [[ $net_mode == true ]]; then
       cache_ok=1
       break
     fi
-    printf '%s\n' "$cache_out" | grep -v '^checking ' >> "$log" || true
+    cache_errs=$(grep -v '^checking ' <<< "$cache_out" || true)
+    printf '%s\n' "$cache_errs" >> "$log"
     [[ $cache_out == *untrusted* ]] && break # it answered: no point in asking again
     sleep 5
   done
   if [[ -z $cache_ok ]]; then
-    cache_why=$(printf '%s\n' "$cache_out" | grep -v '^checking ' | head -n 1 | cut -c 1-160)
+    cache_why=${cache_errs%%$'\n'*}
+    cache_why=${cache_why:0:160}
     if [[ $cache_out == *untrusted* ]]; then
       cache_why="its paths are not signed by the key in this installer ($cache_why)"
     fi
