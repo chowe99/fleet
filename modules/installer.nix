@@ -365,7 +365,8 @@ in {
     networking.useDHCP = true;
     systemd.network.wait-online.enable = false; # the installer waits for the panel itself (panelWait)
 
-    # Everything also goes to the serial port, as a log; the screen shows only the installer.
+    # Everything also goes to the serial port, as a log; the screen shows only the installer, which writes
+    # it itself (installer.sh): journald would send a unit's journal+console copy to this TTYPath too.
     services.journald.extraConfig = ''
       ForwardToConsole=yes
       TTYPath=/dev/ttyS0
@@ -407,8 +408,8 @@ in {
       serviceConfig = {
         Type = "exec";
         ExecStart = lib.getExe installer;
-        StandardOutput = "journal+console";
-        StandardError = "journal+console";
+        StandardOutput = "journal"; # and the screen: installer.sh tees itself to /dev/console
+        StandardError = "journal";
         FailureAction = "poweroff";
       };
     };

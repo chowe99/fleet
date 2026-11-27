@@ -8,6 +8,14 @@
 # panel answering `installing` with the enrol token. Until then every internal disk is read-only.
 
 umask 022
+
+# Everything this prints is for the PC's screen and goes to the journal too (the service's output), which
+# forwards it to the serial port. The screen copy is written here: journald sends a unit's journal+console
+# copy to its TTYPath, the serial port, never to the screen. /dev/console is tty0 (console=tty0 is the last
+# console on the kernel command line), the PC's screen; the first text written there is also what makes the
+# kernel's framebuffer console take the screen over from the firmware.
+exec > >(tee /dev/console) 2>&1
+
 work=/run/fleet-installer
 probe=$work/probe
 log=$work/install.log
