@@ -60,6 +60,42 @@ in
       IMAGE = "${installer.config.system.build.installerImage}/fleet-installer.raw"
       NET = "${net}"
 
+      def refusal_on_screen(machine, label):
+          """The banner must be read off the screen before the PC restarts (it shows for 30 s)."""
+          seen, deadline = "", time.time() + 600
+          while time.time() < deadline and machine.process.poll() is None:
+              try:
+                  seen = machine.get_screen_text()
+              except Exception:
+                  break  # the PC restarted meanwhile
+              if re.search(r"NOT\s*INSTALLING", seen):
+                  wait_gone(machine, 300)
+                  return
+              time.sleep(1)
+          kill(machine)
+          raise Exception(f"{label}: 'NOT INSTALLING' was never readable on the screen; last OCR read: {seen[-600:]!r}")
+
+      def net_pc(name):
+          disk = windows_disk(os.path.join(WORK, f"{name}.raw"))
+          with open(os.path.join(NET, "installer.efi"), "rb") as fh:
+              fat_put(f"{disk}@@{esp_offset(disk)}", "EFI/fleet/installer.efi", fh.read())
+          boot_next_file(name, disk, "\\EFI\\fleet\\installer.efi")
+          m = create_machine(pc_command(name, internal=[disk]), name=name)
+          m.start()
+          return m
+
+      # Calibration: the network installer's stage 1 refusal (nothing published at net.url) is known to reach the
+      # screen, so OCR must read it; otherwise this test cannot tell anything.
+      with subtest("calibration: stage 1's refusal is read off the screen"):
+          refusal_on_screen(net_pc("stage1pc"), "stage 1")
+
+      with subtest("USB installer: its refusal is on the PC's screen"):
+          stick = installer_stick(IMAGE, os.path.join(WORK, "stick.raw"), config=None)
+          disk = windows_disk(os.path.join(WORK, "usb-pc.raw"))
+          m = create_machine(pc_command("usbpc", internal=[disk], usb=[stick]), name="usbpc")
+          m.start()
+          refusal_on_screen(m, "USB installer")
+
       site = subprocess.Popen(["${pkgs.python3}/bin/python3", "-m", "http.server", "8081", "--bind", "127.0.0.1", "--directory", os.path.join(NET, "www")])
       for _ in range(100):
           try:
@@ -68,25 +104,8 @@ in
           except OSError:
               time.sleep(0.1)
 
-      def refusal_on_screen(machine):
-          machine.wait_for_text(r"NOT\s*INSTALLING", timeout=600)
-          wait_gone(machine, 300)
-
-      with subtest("USB installer: its refusal is on the PC's screen"):
-          stick = installer_stick(IMAGE, os.path.join(WORK, "stick.raw"), config=None)
-          disk = windows_disk(os.path.join(WORK, "usb-pc.raw"))
-          m = create_machine(pc_command("usbpc", internal=[disk], usb=[stick]), name="usbpc")
-          m.start()
-          refusal_on_screen(m)
-
       with subtest("network installer, booted once from the PC's own EFI partition: its refusal is on the screen"):
-          disk = windows_disk(os.path.join(WORK, "net-pc.raw"))
-          with open(os.path.join(NET, "installer.efi"), "rb") as fh:
-              fat_put(f"{disk}@@{esp_offset(disk)}", "EFI/fleet/installer.efi", fh.read())
-          boot_next_file("netpc", disk, "\\EFI\\fleet\\installer.efi")
-          m = create_machine(pc_command("netpc", internal=[disk]), name="netpc")
-          m.start()
-          refusal_on_screen(m)
+          refusal_on_screen(net_pc("netpc"), "network installer")
 
       site.kill()
     '';
